@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use labman_config::{EndpointConfig, LabmanConfig};
 use labman_core::endpoint::Endpoint;
-use labman_core::{LabmanError, ModelDescriptor, ModelListResponse, Result};
+use labman_core::{LabmanError, ModelDescriptor, ModelListResponse, NodeCapabilities, Result};
 use labman_telemetry::MetricsRecorder;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -58,6 +58,12 @@ pub struct EndpointRegistry {
     /// the registry can remain usable in environments where metrics are not
     /// desired while still allowing rich telemetry in production.
     metrics: Option<Arc<dyn MetricsRecorder>>,
+
+    /// Index of model ID -> endpoint names that currently advertise that model.
+    ///
+    /// This is derived from `EndpointEntry.discovered_models` and is intended
+    /// for use by routing and capability reporting logic.
+    model_index: HashMap<String, Vec<String>>,
 }
 
 /// A single entry in the registry.
@@ -122,6 +128,7 @@ impl EndpointRegistry {
         Ok(Self {
             endpoints,
             metrics: None,
+            model_index: HashMap::new(),
         })
     }
 
@@ -154,6 +161,54 @@ impl EndpointRegistry {
     pub fn iter(&self) -> impl Iterator<Item = (&String, &EndpointEntry)> {
         self.endpoints.iter()
     }
+
+    /// Get the current model index snapshot.
+    ///
+    /// This returns a borrowed view of the internal index mapping
+    /// `model_id -> Vec<endpoint_name>`. Callers should treat this as
+    /// read-only and rebuild the index via discovery when needed.
+    pub fn model_index(&self) -> &HashMap<String, Vec<String>> {
+        &self.model_index
+    }
+
+    /// Build `NodeCapabilities` from the currently discovered models and
+    /// endpoint configuration.
+    ///
+    /// This flattens all unique model IDs across endpoints and uses simple
+    /// heuristics for capacity:
+    /// - `endpoint_count`: total configured endpoints.
+    /// - `max_concurrent_requests`: sum of per-endpoint `max_concurrent`
+    ///   values, ignoring `None` entries.
+    pub fn to_node_capabilities(&self) -> NodeCapabilities {
+        use std::collections::HashSet;
+
+        let mut unique_models: HashSet<String> = HashSet::new();
+        let mut models: Vec<ModelDescriptor> = Vec::new();
+
+        for entry in self.endpoints.values() {
+            for model in &entry.discovered_models {
+                if unique_models.insert(model.id.clone()) {
+                    models.push(model.clone());
+                }
+            }
+        }
+
+        let endpoint_count = self.endpoints.len();
+
+        let max_concurrent_requests = self
+            .endpoints
+            .values()
+            .filter_map(|e| e.meta.max_concurrent)
+            .reduce(|acc, v| acc.saturating_add(v));
+
+        let mut caps = NodeCapabilities::new(models, endpoint_count);
+        if let Some(max) = max_concurrent_requests {
+            caps = caps.with_max_concurrent(max);
+        }
+        caps
+    }
+
+    /// Convert an `EndpointConfig` into a `labman_core::Endpoint`, performing
 
     /// Convert an `EndpointConfig` into a `labman_core::Endpoint`, performing
     /// minimal validation/normalisation on the base URL.
@@ -342,12 +397,51 @@ impl EndpointRegistry {
                 });
             }
 
+            /// Rebuild the `model_index` from the current `discovered_models` of each
+            /// endpoint. This is called after a successful model discovery pass.
+            impl EndpointRegistry {
+                fn rebuild_model_index(&mut self) {
+                    self.model_index.clear();
+
+                    for (endpoint_name, entry) in self.endpoints.iter() {
+                        for model in &entry.discovered_models {
+                            let id = model.id.clone();
+                            self.model_index
+                                .entry(id)
+                                .or_insert_with(Vec::new)
+                                .push(endpoint_name.clone());
+                        }
+                    }
+                }
+
+                /// Skeleton for selecting an endpoint for a given model.
+                ///
+                /// For now this is a minimal implementation:
+                /// - Looks up the model in `model_index`.
+                /// - Returns the first matching endpoint entry, if any.
+                ///
+                /// Future work:
+                /// - Integrate health status and `active_requests`.
+                /// - Implement better scheduling (round-robin, least-loaded, etc.).
+                pub fn select_endpoint_for_model(
+                    &self,
+                    model_id: &str,
+                ) -> Option<(&String, &EndpointEntry)> {
+                    let endpoint_names = self.model_index.get(model_id)?;
+                    let first = endpoint_names.first()?;
+                    self.endpoints.get_key_value(first)
+                }
+            }
+
             entry.discovered_models = models;
 
             if let Some(metrics) = &self.metrics {
                 metrics.record_request_end(Some(name.as_str()), None, true, None);
             }
         }
+
+        // Rebuild the model index from the newly discovered models.
+        self.rebuild_model_index();
 
         Ok(())
     }
@@ -448,7 +542,6 @@ impl EndpointRegistryBuilder {
 /// This is intentionally minimal and can be replaced with a more robust
 /// implementation later if needed.
 fn glob_match(pattern: &str, text: &str) -> bool {
-    // Simple cases first
     if pattern == "*" {
         return true;
     }
