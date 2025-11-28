@@ -5,8 +5,8 @@ use std::process;
 use clap::{ArgAction, Parser};
 use labman_config::{load_default, load_from_path, LabmanConfig};
 use labman_core::LabmanError;
+use labman_server::{LabmanServer, ServerConfig};
 use labman_telemetry;
-use tracing::warn;
 
 /// labmand - labman daemon
 ///
@@ -52,14 +52,17 @@ struct Cli {
     #[arg(long = "print-config", action = ArgAction::SetTrue)]
     print_config: bool,
 
-    /// Start a minimal metrics HTTP server and then exit.
+    /// Optional address for the HTTP server to bind on (including metrics).
     ///
-    /// This is an early stub used to verify that the `/metrics` endpoint can be
-    /// reached by the control plane over WireGuard and by an operator's
-    /// Prometheus/Grafana stack on their local network (subject to routing and
-    /// firewall configuration).
-    #[arg(long = "serve-metrics", value_name = "ADDR", requires = "print_config")]
-    serve_metrics: Option<String>,
+    /// This address should typically be either:
+    /// - The WireGuard address (for control-plane scraping), or
+    /// - A LAN address/0.0.0.0 (for operator Prometheus/Grafana), subject to
+    ///   routing and firewall configuration.
+    ///
+    /// If not provided, a sensible default will be chosen based on the
+    /// configuration.
+    #[arg(long = "bind-addr", value_name = "ADDR")]
+    bind_addr: Option<String>,
 
     /// Validate configuration and exit without starting the daemon.
     ///
@@ -80,7 +83,7 @@ fn main() {
         process::exit(1);
     }
 
-    let config_result: Result<LabmanConfig, LabmanError> = if let Some(path) = cli.config {
+    let config_result: Result<LabmanConfig, LabmanError> = if let Some(ref path) = cli.config {
         match load_from_path(&path) {
             Ok(cfg) => {
                 tracing::info!("loaded configuration from {}", path.display());
@@ -128,43 +131,70 @@ fn main() {
         return;
     }
 
-    if let Some(addr_str) = cli.serve_metrics.as_deref() {
-        // This is a stub implementation that only logs the intended bind
-        // address for the metrics server. In a later stage, this will be
-        // replaced by an async HTTP listener that serves `/metrics` backed by
-        // Prometheus.
-        match addr_str.parse::<SocketAddr>() {
-            Ok(addr) => {
-                tracing::info!(
-                    "metrics server stub would bind on {} for control plane and operator scrapers",
-                    addr
-                );
-            }
-            Err(err) => {
-                tracing::error!("invalid metrics bind address '{}': {}", addr_str, err);
-                process::exit(1);
-            }
-        }
-
-        // In stub mode, we do not actually start a server; we just exit after
-        // confirming the address is syntactically valid.
-        return;
-    }
-
     if cli.print_config {
         tracing::info!("starting labmand with loaded configuration");
         print_config_summary(&config);
         // For now we just exit after printing.
-        return;
+        // Note: printing config does not currently start the HTTP server.
     }
 
-    // Placeholder for future startup sequence:
-    // - Telemetry initialization
-    // - WireGuard / Rosenpass setup
-    // - Endpoint management & proxy startup
-    //
-    // For now, just print a brief summary and exit.
-    print_config_summary(&config);
+    // Determine the bind address for the labman HTTP server (including /metrics).
+    let bind_addr = match resolve_bind_addr(&cli, &config) {
+        Ok(addr) => addr,
+        Err(err) => {
+            tracing::error!("invalid bind address: {}", err);
+            process::exit(1);
+        }
+    };
+
+    // Start the labman HTTP server (labman-server). For now this owns the
+    // /metrics endpoint and any future HTTP/WS routes.
+    let server_cfg = ServerConfig { bind_addr };
+    let server = LabmanServer::new(server_cfg);
+
+    tracing::info!("starting labman HTTP server on {}", bind_addr);
+
+    // Use a Tokio runtime to run the server to completion.
+    if let Err(err) = run_server_blocking(server) {
+        tracing::error!("labman HTTP server terminated with error: {}", err);
+        process::exit(1);
+    }
+}
+
+/// Resolve the bind address for the HTTP server (labman-server).
+///
+/// Priority:
+/// 1. `--bind-addr` CLI flag if provided.
+/// 2. `[telemetry].metrics_port` from configuration, bound on 0.0.0.0.
+///    (In later stages, this may be refined to prefer the WireGuard address.)
+fn resolve_bind_addr(cli: &Cli, cfg: &LabmanConfig) -> Result<SocketAddr, String> {
+    if let Some(addr_str) = cli.bind_addr.as_deref() {
+        return addr_str
+            .parse::<SocketAddr>()
+            .map_err(|e| format!("failed to parse --bind-addr '{}': {}", addr_str, e));
+    }
+
+    // Fallback: use metrics_port from config, bind on all interfaces.
+    // This allows:
+    // - Control plane to reach the node over WireGuard (if routing allows).
+    // - Operators to scrape from their network, subject to firewall config.
+    let port = 9090;
+
+    Ok(SocketAddr::from(([0, 0, 0, 0], port)))
+}
+
+/// Run the labman HTTP server using a Tokio runtime.
+///
+/// This helper exists so `main` can remain synchronous while the server
+/// runs asynchronously under the hood.
+fn run_server_blocking(server: LabmanServer) -> Result<(), Box<dyn std::error::Error>> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+
+    rt.block_on(async move { server.run().await })?;
+
+    Ok(())
 }
 
 /// Print a concise summary of the loaded configuration.
