@@ -814,6 +814,13 @@ dependencies = [
 [[package]]
 name = "labman-endpoints"
 version = "0.0.1"
+dependencies = [
+ "labman-config",
+ "labman-core",
+ "labman-telemetry",
+ "serde",
+ "thiserror 1.0.69",
+]
 
 [[package]]
 name = "labman-proxy"
