@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use labman_config::{EndpointConfig, LabmanConfig};
 use labman_core::endpoint::Endpoint;
@@ -7,6 +8,7 @@ use labman_core::{LabmanError, Result};
 use labman_telemetry::MetricsRecorder;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing;
 
 /// Errors specific to endpoint registry operations.
 #[derive(Debug, Error)]
@@ -42,10 +44,20 @@ pub struct EndpointMeta {
 ///
 /// This is the central in-process view of all OpenAI-compatible upstreams
 /// (Ollama, vLLM, llama.cpp, etc.) that labman can proxy traffic to.
-#[derive(Debug)]
+///
+/// The registry is designed to be wrapped in an `Arc<tokio::sync::Mutex<_>>`
+/// when used from async contexts so that background tasks (such as periodic
+/// health checks and model discovery) can mutate shared state safely.
 pub struct EndpointRegistry {
     /// Endpoints keyed by logical name.
     endpoints: HashMap<String, EndpointEntry>,
+
+    /// Optional shared metrics recorder for emitting health and request metrics.
+    ///
+    /// This is provided via `EndpointRegistryBuilder::with_metrics` so that
+    /// the registry can remain usable in environments where metrics are not
+    /// desired while still allowing rich telemetry in production.
+    metrics: Option<Arc<dyn MetricsRecorder>>,
 }
 
 /// A single entry in the registry.
@@ -100,7 +112,10 @@ impl EndpointRegistry {
             endpoints.insert(ep_cfg.name.clone(), entry);
         }
 
-        Ok(Self { endpoints })
+        Ok(Self {
+            endpoints,
+            metrics: None,
+        })
     }
 
     /// Return the number of configured endpoints.
@@ -121,6 +136,11 @@ impl EndpointRegistry {
     /// Get a mutable endpoint entry by name.
     pub fn get_mut(&mut self, name: &str) -> Option<&mut EndpointEntry> {
         self.endpoints.get_mut(name)
+    }
+
+    /// Whether metrics recording is enabled for this registry.
+    pub fn has_metrics(&self) -> bool {
+        self.metrics.is_some()
     }
 
     /// Iterate over all endpoint entries.
@@ -156,23 +176,120 @@ impl EndpointRegistry {
 
     /// Perform a basic health check for all configured endpoints.
     ///
-    /// This initial implementation is deliberately conservative and does not
-    /// contact the upstream endpoints yet. Instead, it:
-    ///
-    /// - Marks all endpoints as healthy.
-    /// - Emits log/metric hooks in a single place so that future iterations
-    ///   can add real HTTP-based health checks and model discovery without
-    ///   changing the call sites.
+    /// This synchronous variant is intentionally simple and currently just
+    /// marks all endpoints as healthy. It is retained for callers that don't
+    /// require HTTP probing.
     pub fn health_check_all(&mut self) -> Result<()> {
-        for (_name, entry) in self.endpoints.iter_mut() {
-            // Placeholder: in a future iteration we will:
-            // - Perform an HTTP health probe and/or GET /v1/models.
-            // - Update `entry.healthy` based on the outcome.
-            // - Record success/failure metrics via a MetricsRecorder.
+        for (name, entry) in self.endpoints.iter_mut() {
             entry.healthy = true;
+
+            if let Some(metrics) = &self.metrics {
+                metrics.record_request_end(Some(name.as_str()), None, true, None);
+            }
         }
 
         Ok(())
+    }
+
+    /// Perform an HTTP-based health check for all configured endpoints.
+    ///
+    /// This initial implementation:
+    /// - Issues a GET request to `{base_url}` (typically `/v1`).
+    /// - Considers 2xx responses as healthy.
+    /// - Marks other responses or network errors as unhealthy.
+    /// - Emits basic success/failure metrics when a `MetricsRecorder` is present.
+    ///
+    /// It is async so it can be used from Tokio-based code paths in `labmand`.
+    pub async fn health_check_all_http(&mut self) -> Result<()> {
+        let client = reqwest::Client::new();
+
+        for (name, entry) in self.endpoints.iter_mut() {
+            let url = &entry.endpoint.base_url;
+            let resp = client.get(url).send().await;
+
+            match resp {
+                Ok(r) if r.status().is_success() => {
+                    entry.healthy = true;
+
+                    if let Some(metrics) = &self.metrics {
+                        metrics.record_request_end(Some(name.as_str()), None, true, None);
+                    }
+                }
+                Ok(r) => {
+                    entry.healthy = false;
+                    let status = r.status();
+                    tracing::warn!(
+                        "endpoint '{}' unhealthy: HTTP {}",
+                        entry.endpoint.name,
+                        status
+                    );
+
+                    if let Some(metrics) = &self.metrics {
+                        metrics.record_error(Some(name.as_str()), "health_http_status");
+                    }
+                }
+                Err(e) => {
+                    entry.healthy = false;
+                    tracing::warn!(
+                        "endpoint '{}' unhealthy: request error: {}",
+                        entry.endpoint.name,
+                        e
+                    );
+
+                    if let Some(metrics) = &self.metrics {
+                        metrics.record_error(Some(name.as_str()), "health_http_error");
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Spawn a periodic HTTP-based health checker.
+    ///
+    /// This is intended to be called from an async context with a shared
+    /// `Arc<tokio::sync::Mutex<EndpointRegistry>>`. It will:
+    ///
+    /// - Run `health_check_all_http` on the given interval.
+    /// - Log any internal errors but keep the task alive.
+    ///
+    /// The task will run until the provided `shutdown` future resolves.
+    ///
+    /// Example usage:
+    ///
+    /// ```ignore
+    /// let registry = Arc::new(tokio::sync::Mutex::new(registry));
+    /// let shutdown = shutdown_signal(); // some Future that resolves on shutdown
+    /// EndpointRegistry::spawn_periodic_health_check(registry.clone(), Duration::from_secs(30), shutdown);
+    /// ```
+    pub fn spawn_periodic_health_check<S>(
+        registry: Arc<tokio::sync::Mutex<EndpointRegistry>>,
+        interval: Duration,
+        shutdown: S,
+    ) where
+        S: std::future::Future<Output = ()> + Send + 'static,
+    {
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            tokio::pin!(shutdown);
+
+            loop {
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        let mut guard = registry.lock().await;
+                        let res = guard.health_check_all_http().await;
+                        if let Err(err) = res {
+                            tracing::warn!("periodic endpoint HTTP health check failed: {}", err);
+                        }
+                    }
+                    _ = &mut shutdown => {
+                        tracing::info!("stopping periodic endpoint health checker");
+                        break;
+                    }
+                }
+            }
+        });
     }
 }
 
@@ -203,13 +320,14 @@ impl EndpointRegistryBuilder {
 
     /// Build the registry.
     ///
-    /// For now this simply delegates to `EndpointRegistry::from_config`. In
-    /// future iterations this can:
+    /// For now this populates the metrics recorder (if provided) and delegates
+    /// to `EndpointRegistry::from_config`. In future iterations this can:
     /// - Start health/model discovery tasks using the provided metrics.
     /// - Return a richer handle wrapping both the registry and its tasks.
     pub fn build(self) -> Result<EndpointRegistry> {
-        let _maybe_metrics = self.metrics;
-        EndpointRegistry::from_config(&self.config)
+        let mut registry = EndpointRegistry::from_config(&self.config)?;
+        registry.metrics = self.metrics;
+        Ok(registry)
     }
 }
 

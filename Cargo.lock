@@ -818,8 +818,11 @@ dependencies = [
  "labman-config",
  "labman-core",
  "labman-telemetry",
+ "reqwest",
  "serde",
  "thiserror 1.0.69",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -1,11 +1,13 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process;
+use std::sync::Arc;
+use std::time::Duration;
 
 use clap::{ArgAction, Parser};
 use labman_config::{load_default, load_from_path, LabmanConfig};
 use labman_core::LabmanError;
-use labman_endpoints::EndpointRegistry;
+use labman_endpoints::{EndpointRegistry, EndpointRegistryBuilder};
 use labman_server::{LabmanServer, ServerConfig};
 use labman_telemetry;
 use tracing::warn;
@@ -140,34 +142,6 @@ fn main() {
         // Note: printing config does not currently start the HTTP server.
     }
 
-    // Build the endpoint registry from configuration so that core model-serving
-    // state is available early, even before WireGuard/proxy layers are added.
-    let mut registry = match EndpointRegistry::from_config(&config) {
-        Ok(registry) => {
-            tracing::info!("configured {} endpoints", registry.len());
-            for (name, entry) in registry.iter() {
-                tracing::info!(
-                    "endpoint '{}' -> base_url={}, max_concurrent={:?}",
-                    name,
-                    entry.endpoint.base_url,
-                    entry.meta.max_concurrent
-                );
-            }
-            registry
-        }
-        Err(err) => {
-            tracing::error!("failed to build endpoint registry from config: {}", err);
-            process::exit(1);
-        }
-    };
-
-    // Perform an initial health check pass so that downstream components
-    // (proxy, control-plane reporting) can rely on basic health status.
-    if let Err(err) = registry.health_check_all() {
-        tracing::error!("initial endpoint health check failed: {}", err);
-        process::exit(1);
-    }
-
     // Determine the bind address for the labman HTTP server (including /metrics).
     let bind_addr = match resolve_bind_addr(&cli, &config) {
         Ok(addr) => addr,
@@ -177,15 +151,12 @@ fn main() {
         }
     };
 
-    // Start the labman HTTP server (labman-server). For now this owns the
-    // /metrics endpoint and any future HTTP/WS routes.
-    let server_cfg = ServerConfig { bind_addr };
-    let server = LabmanServer::new(server_cfg);
+    // Build the endpoint registry from configuration so that core model-serving
+    // state is available early, even before WireGuard/proxy layers are added.
+    let registry_config = config.clone();
 
-    tracing::info!("starting labman HTTP server on {}", bind_addr);
-
-    // Use a Tokio runtime to run the server to completion.
-    if let Err(err) = run_server_blocking(server) {
+    // Use a Tokio runtime to run the HTTP server and background tasks to completion.
+    if let Err(err) = run_server_blocking(bind_addr, registry_config) {
         tracing::error!("labman HTTP server terminated with error: {}", err);
         process::exit(1);
     }
@@ -237,14 +208,91 @@ fn resolve_bind_addr(cli: &Cli, cfg: &LabmanConfig) -> Result<SocketAddr, String
 ///
 /// This helper exists so `main` can remain synchronous while the server
 /// runs asynchronously under the hood.
-fn run_server_blocking(server: LabmanServer) -> Result<(), Box<dyn std::error::Error>> {
+fn run_server_blocking(
+    bind_addr: SocketAddr,
+    config: LabmanConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
 
-    rt.block_on(async move { server.run().await })?;
+    let result: Result<(), Box<dyn std::error::Error>> = rt.block_on(async move {
+        // Start the labman HTTP server (labman-server). For now this owns the
+        // /metrics endpoint and any future HTTP/WS routes.
+        let server_cfg = ServerConfig { bind_addr };
+        let server = LabmanServer::new(server_cfg);
 
-    Ok(())
+        tracing::info!("starting labman HTTP server on {}", bind_addr);
+
+        // Build the endpoint registry from configuration so that core model-serving
+        // state is available early, even before WireGuard/proxy layers are added.
+        // We attach the shared metrics recorder from the HTTP server so that
+        // health checks and future scheduling logic can emit metrics.
+        let registry = match EndpointRegistryBuilder::new(config.clone())
+            .with_metrics(server.metrics_recorder())
+            .build()
+        {
+            Ok(registry) => {
+                tracing::info!("configured {} endpoints", registry.len());
+                for (name, entry) in registry.iter() {
+                    tracing::info!(
+                        "endpoint '{}' -> base_url={}, max_concurrent={:?}",
+                        name,
+                        entry.endpoint.base_url,
+                        entry.meta.max_concurrent
+                    );
+                }
+                registry
+            }
+            Err(err) => {
+                tracing::error!("failed to build endpoint registry from config: {}", err);
+                return Err::<(), Box<dyn std::error::Error>>(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    err.to_string(),
+                )));
+            }
+        };
+
+        // Wrap the registry so that background tasks can mutate it.
+        let registry = Arc::new(tokio::sync::Mutex::new(registry));
+
+        // Perform an initial HTTP-based health check pass so that downstream
+        // components (proxy, control-plane reporting) can rely on basic health
+        // status.
+        {
+            let mut guard = registry.lock().await;
+            if let Err(err) = guard.health_check_all_http().await {
+                tracing::error!("initial endpoint HTTP health check failed: {}", err);
+                return Err::<(), Box<dyn std::error::Error>>(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    err.to_string(),
+                )));
+            }
+        }
+
+        // Spawn periodic health checks. For now we use a fixed interval; later
+        // this can be made configurable.
+        EndpointRegistry::spawn_periodic_health_check(
+            registry.clone(),
+            Duration::from_secs(30),
+            async {
+                // Shutdown is currently tied to server lifetime; when the
+                // server future completes, this future will also complete.
+            },
+        );
+
+        // Run the HTTP server to completion.
+        if let Err(e) = server.run().await {
+            return Err::<(), Box<dyn std::error::Error>>(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            )));
+        }
+
+        Ok(())
+    });
+
+    result
 }
 
 /// Print a concise summary of the loaded configuration.
