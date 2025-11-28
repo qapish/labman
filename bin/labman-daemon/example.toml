@@ -1,0 +1,128 @@
+# labmand Example Configuration
+#
+# This example configuration is intended for local development and testing of
+# the labman daemon and HTTP server. It is safe to use on a development
+# machine and is NOT intended for production deployments.
+#
+# To start the daemon with this configuration from the workspace root:
+#
+#   cargo run --bin labmand -- --config ./bin/labman-daemon/example.toml
+#
+# By default, labmand will:
+# - Bind its HTTP server (including /metrics) on 0.0.0.0:9090
+# - Connect to a placeholder control plane URL
+# - Assume a simple local endpoint running on localhost
+#
+# Adjust values as needed for your environment.
+
+# ============================================================================
+# Control Plane Configuration
+# ============================================================================
+
+[control_plane]
+# Base URL of the control plane API. For local development this is often a
+# placeholder; in production it would point at a real control-plane service.
+base_url = "https://control.example.local/api/v1"
+
+# Node authentication token used to authenticate with the control plane.
+# In real deployments this should be treated as a secret.
+node_token = "local-dev-node-token"
+
+# Optional region/campus identifier for this node.
+region = "dev-local"
+
+# Optional human-readable description of this node.
+description = "Local development node"
+
+# ============================================================================
+# WireGuard / Rosenpass Configuration
+# ============================================================================
+
+[wireguard]
+# Logical interface name; for development this does not need to exist yet.
+interface_name = "labman0"
+
+# Optional WireGuard address in CIDR notation. In a real deployment this
+# would be assigned by the control plane. For local tests this can remain
+# unset or use a dummy value.
+address = "10.90.0.2/32"
+
+# Paths to key material. For development these can be placeholders; the
+# WireGuard/Rosenpass layer is not yet wired in this example.
+private_key_path = "/etc/labman/wg-private.key"
+public_key_path  = "/etc/labman/wg-public.key"
+
+# Control-plane WireGuard endpoint (host:port). Placeholder for now.
+peer_endpoint = "control.example.local:51820"
+
+# Allowed IPs for the control-plane peer. For a real deployment this would
+# typically be restricted to the control plane's WG address/range.
+allowed_ips = ["10.90.0.1/32"]
+
+# Optional Rosenpass configuration (left empty for now; reserved for future use).
+[wireguard.rosenpass]
+private_key_path     = "/etc/labman/rosenpass-private.key"
+public_key_path      = "/etc/labman/rosenpass-public.key"
+peer_public_key_path = "/etc/labman/rosenpass-peer-public.key"
+
+# ============================================================================
+# Proxy Configuration
+# ============================================================================
+
+[proxy]
+# Port the OpenAI-compatible proxy will listen on (once implemented).
+# For now this is just part of the configuration model and not yet used.
+listen_port = 8080
+
+# Optional explicit listen address for the proxy. In the future this will be
+# constrained so that it binds only to the WireGuard address by default.
+# listen_addr = "10.90.0.2"
+
+# ============================================================================
+# Endpoint Configuration
+# ============================================================================
+
+# Example endpoint representing a local LLM server (e.g. Ollama, vLLM, llama.cpp)
+[[endpoints]]
+name = "local-llm"
+base_url = "http://127.0.0.1:11434/v1"
+max_concurrent = 8
+
+# Only expose models whose IDs start with "llama" or "mistral" from this endpoint.
+models_include = ["llama*", "mistral*"]
+# Exclude any test or experimental models.
+models_exclude = ["*test*", "*experimental*"]
+
+# ============================================================================
+# Telemetry Configuration
+# ============================================================================
+
+[telemetry]
+# Log level for labmand and related components. This interacts with RUST_LOG,
+# but explicit CLI flags (e.g. --log-level) take precedence.
+log_level = "info"
+
+# Log format: "text" or "json" (the latter is useful in container environments).
+log_format = "text"
+
+# Enable Prometheus metrics endpoint. labman-server will expose /metrics on the
+# HTTP server bound by labmand.
+enable_metrics = true
+
+# Port for the metrics HTTP endpoint. When running with the default settings,
+# labmand will currently bind on 0.0.0.0:<metrics_port>.
+metrics_port = 9090
+
+# ============================================================================
+# Notes
+# ============================================================================
+#
+# - This configuration is deliberately minimal and development-focused.
+# - The WireGuard and Rosenpass settings are placeholders; the corresponding
+#   layers are not yet fully implemented.
+# - The /metrics endpoint is served by the labman-server crate. With this
+#   config, you can verify it by running:
+#
+#     curl http://127.0.0.1:9090/metrics
+#
+#   after starting labmand with the command at the top of this file.

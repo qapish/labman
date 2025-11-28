@@ -8,6 +8,11 @@ use tracing_subscriber::fmt;
 use tracing_subscriber::fmt::time::OffsetTime;
 use tracing_subscriber::prelude::*;
 
+/// Re-export the Prometheus-backed metrics recorder when the `prometheus`
+/// feature is enabled so that other crates can depend on a concrete type.
+#[cfg(feature = "prometheus")]
+pub use crate::prometheus_impl::PrometheusMetricsRecorder;
+
 #[cfg(feature = "prometheus")]
 use prometheus::{
     Encoder, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, Opts, Registry, TextEncoder,
@@ -145,171 +150,173 @@ impl MetricsRecorder for NoopMetricsRecorder {
 }
 
 #[cfg(feature = "prometheus")]
-/// Prometheus HTTP metrics handler.
-///
-/// This function encodes the given registry into Prometheus' text exposition
-/// format and returns an HTTP response suitable for serving on a `/metrics`
-/// endpoint.
-///
-/// Typical usage in an HTTP server:
-///
-/// - Expose this handler at `/metrics` on a listener that is reachable:
-///   - Over the WireGuard tunnel for the control plane.
-///   - From the operator's local network for their own Prometheus/Grafana stack,
-///     if they configure routing/firewalling appropriately.
-///
-/// The handler itself is agnostic to how the listener is exposed; that is the
-/// daemon's responsibility.
-pub fn prometheus_http_response(registry: &Registry) -> Response<Bytes> {
-    let encoder = TextEncoder::new();
-    let metric_families = registry.gather();
+mod prometheus_impl {
+    use super::*;
 
-    let mut buffer = Vec::new();
-    if let Err(err) = encoder.encode(&metric_families, &mut buffer) {
-        // In case of encoding failure, return a 500 with a simple text body.
-        let body = format!("failed to encode Prometheus metrics: {}", err);
-        return Response::builder()
-            .status(500)
-            .header("Content-Type", "text/plain; charset=utf-8")
-            .body(Bytes::from(body))
-            .unwrap_or_else(|_| Response::new(Bytes::from_static(b"internal error")));
+    #[cfg(feature = "prometheus")]
+    /// Prometheus HTTP metrics handler.
+    ///
+    /// This function encodes the given registry into Prometheus' text exposition
+    /// format and returns an HTTP response suitable for serving on a `/metrics`
+    /// endpoint.
+    ///
+    /// Typical usage in an HTTP server:
+    ///
+    /// - Expose this handler at `/metrics` on a listener that is reachable:
+    ///   - Over the WireGuard tunnel for the control plane.
+    ///   - From the operator's local network for their own Prometheus/Grafana stack,
+    ///     if they configure routing/firewalling appropriately.
+    ///
+    /// The handler itself is agnostic to how the listener is exposed; that is the
+    /// daemon's responsibility.
+    pub fn prometheus_http_response(registry: &Registry) -> Response<Bytes> {
+        let encoder = TextEncoder::new();
+        let metric_families = registry.gather();
+
+        let mut buffer = Vec::new();
+        if let Err(err) = encoder.encode(&metric_families, &mut buffer) {
+            // In case of encoding failure, return a 500 with a simple text body.
+            let body = format!("failed to encode Prometheus metrics: {}", err);
+            return Response::builder()
+                .status(500)
+                .header("Content-Type", "text/plain; charset=utf-8")
+                .body(Bytes::from(body))
+                .unwrap_or_else(|_| Response::new(Bytes::from_static(b"internal error")));
+        }
+
+        Response::builder()
+            .status(200)
+            .header(
+                "Content-Type",
+                encoder.format_type(), // e.g. "text/plain; version=0.0.4"
+            )
+            .body(Bytes::from(buffer))
+            .unwrap_or_else(|_| Response::new(Bytes::from_static(b"internal error")))
     }
 
-    Response::builder()
-        .status(200)
-        .header(
-            "Content-Type",
-            encoder.format_type(), // e.g. "text/plain; version=0.0.4"
-        )
-        .body(Bytes::from(buffer))
-        .unwrap_or_else(|_| Response::new(Bytes::from_static(b"internal error")))
-}
+    /// Prometheus-backed metrics recorder and HTTP exporter.
+    ///
+    /// This is behind the `prometheus` feature flag so that deployments which do
+    /// not require metrics do not have to pull in the Prometheus and async HTTP
+    /// stacks.
+    #[derive(Clone)]
+    pub struct PrometheusMetricsRecorder {
+        pub(crate) registry: Registry,
+        requests_total: IntCounterVec,
+        request_latency_seconds: HistogramVec,
+        active_requests: IntGauge,
+        errors_total: IntCounterVec,
+    }
 
-/// Prometheus-backed metrics recorder and HTTP exporter.
-///
-/// This is behind the `prometheus` feature flag so that deployments which do
-/// not require metrics do not have to pull in the Prometheus and async HTTP
-/// stacks.
-#[cfg(feature = "prometheus")]
-#[derive(Clone)]
-pub struct PrometheusMetricsRecorder {
-    registry: Registry,
-    requests_total: IntCounterVec,
-    request_latency_seconds: HistogramVec,
-    active_requests: IntGauge,
-    errors_total: IntCounterVec,
-}
+    impl PrometheusMetricsRecorder {
+        /// Create a new Prometheus-backed recorder with a fresh registry.
+        pub fn new() -> Self {
+            let registry = Registry::new();
 
-#[cfg(feature = "prometheus")]
-impl PrometheusMetricsRecorder {
-    /// Create a new Prometheus-backed recorder with a fresh registry.
-    pub fn new() -> Self {
-        let registry = Registry::new();
-
-        let requests_total = IntCounterVec::new(
-            Opts::new(
-                "labman_requests_total",
-                "Total number of requests processed",
+            let requests_total = IntCounterVec::new(
+                Opts::new(
+                    "labman_requests_total",
+                    "Total number of requests processed",
+                )
+                .namespace("labman"),
+                &["endpoint", "model", "success"],
             )
-            .namespace("labman"),
-            &["endpoint", "model", "success"],
-        )
-        .expect("failed to create labman_requests_total counter");
-        registry
-            .register(Box::new(requests_total.clone()))
-            .expect("failed to register labman_requests_total");
+            .expect("failed to create labman_requests_total counter");
+            registry
+                .register(Box::new(requests_total.clone()))
+                .expect("failed to register labman_requests_total");
 
-        let request_latency_seconds = HistogramVec::new(
-            HistogramOpts::new(
-                "labman_request_latency_seconds",
-                "Request latency in seconds",
+            let request_latency_seconds = HistogramVec::new(
+                HistogramOpts::new(
+                    "labman_request_latency_seconds",
+                    "Request latency in seconds",
+                )
+                .namespace("labman"),
+                &["endpoint", "model"],
             )
-            .namespace("labman"),
-            &["endpoint", "model"],
-        )
-        .expect("failed to create labman_request_latency_seconds histogram");
-        registry
-            .register(Box::new(request_latency_seconds.clone()))
-            .expect("failed to register labman_request_latency_seconds");
+            .expect("failed to create labman_request_latency_seconds histogram");
+            registry
+                .register(Box::new(request_latency_seconds.clone()))
+                .expect("failed to register labman_request_latency_seconds");
 
-        let active_requests = IntGauge::with_opts(
-            Opts::new(
-                "labman_active_requests",
-                "Number of active proxied requests on this node",
+            let active_requests = IntGauge::with_opts(
+                Opts::new(
+                    "labman_active_requests",
+                    "Number of active proxied requests on this node",
+                )
+                .namespace("labman"),
             )
-            .namespace("labman"),
-        )
-        .expect("failed to create labman_active_requests gauge");
-        registry
-            .register(Box::new(active_requests.clone()))
-            .expect("failed to register labman_active_requests");
+            .expect("failed to create labman_active_requests gauge");
+            registry
+                .register(Box::new(active_requests.clone()))
+                .expect("failed to register labman_active_requests");
 
-        let errors_total = IntCounterVec::new(
-            Opts::new(
-                "labman_errors_total",
-                "Total number of errors encountered by this node",
+            let errors_total = IntCounterVec::new(
+                Opts::new(
+                    "labman_errors_total",
+                    "Total number of errors encountered by this node",
+                )
+                .namespace("labman"),
+                &["endpoint", "kind"],
             )
-            .namespace("labman"),
-            &["endpoint", "kind"],
-        )
-        .expect("failed to create labman_errors_total counter");
-        registry
-            .register(Box::new(errors_total.clone()))
-            .expect("failed to register labman_errors_total");
+            .expect("failed to create labman_errors_total counter");
+            registry
+                .register(Box::new(errors_total.clone()))
+                .expect("failed to register labman_errors_total");
 
-        Self {
-            registry,
-            requests_total,
-            request_latency_seconds,
-            active_requests,
-            errors_total,
+            Self {
+                registry,
+                requests_total,
+                request_latency_seconds,
+                active_requests,
+                errors_total,
+            }
+        }
+
+        /// Access the underlying Prometheus registry, for use by HTTP exporters.
+        pub fn registry(&self) -> &Registry {
+            &self.registry
         }
     }
 
-    /// Access the underlying Prometheus registry, for use by HTTP exporters.
-    pub fn registry(&self) -> &Registry {
-        &self.registry
-    }
-}
-
-#[cfg(feature = "prometheus")]
-impl MetricsRecorder for PrometheusMetricsRecorder {
-    fn record_request_start(&self, _endpoint: Option<&str>, _model: Option<&str>) {
-        // We don't change any counters here; active_requests is updated via
-        // set_active_requests, which the caller should maintain.
-    }
-
-    fn record_request_end(
-        &self,
-        endpoint: Option<&str>,
-        model: Option<&str>,
-        success: bool,
-        latency_secs: Option<f64>,
-    ) {
-        let endpoint_label = endpoint.unwrap_or("_unknown");
-        let model_label = model.unwrap_or("_unknown");
-        let success_label = if success { "true" } else { "false" };
-
-        self.requests_total
-            .with_label_values(&[endpoint_label, model_label, success_label])
-            .inc();
-
-        if let Some(lat) = latency_secs {
-            self.request_latency_seconds
-                .with_label_values(&[endpoint_label, model_label])
-                .observe(lat);
+    impl MetricsRecorder for PrometheusMetricsRecorder {
+        fn record_request_start(&self, _endpoint: Option<&str>, _model: Option<&str>) {
+            // We don't change any counters here; active_requests is updated via
+            // set_active_requests, which the caller should maintain.
         }
-    }
 
-    fn record_error(&self, endpoint: Option<&str>, kind: &str) {
-        let endpoint_label = endpoint.unwrap_or("_unknown");
-        self.errors_total
-            .with_label_values(&[endpoint_label, kind])
-            .inc();
-    }
+        fn record_request_end(
+            &self,
+            endpoint: Option<&str>,
+            model: Option<&str>,
+            success: bool,
+            latency_secs: Option<f64>,
+        ) {
+            let endpoint_label = endpoint.unwrap_or("_unknown");
+            let model_label = model.unwrap_or("_unknown");
+            let success_label = if success { "true" } else { "false" };
 
-    fn set_active_requests(&self, count: u64) {
-        self.active_requests.set(count as i64);
+            self.requests_total
+                .with_label_values(&[endpoint_label, model_label, success_label])
+                .inc();
+
+            if let Some(lat) = latency_secs {
+                self.request_latency_seconds
+                    .with_label_values(&[endpoint_label, model_label])
+                    .observe(lat);
+            }
+        }
+
+        fn record_error(&self, endpoint: Option<&str>, kind: &str) {
+            let endpoint_label = endpoint.unwrap_or("_unknown");
+            self.errors_total
+                .with_label_values(&[endpoint_label, kind])
+                .inc();
+        }
+
+        fn set_active_requests(&self, count: u64) {
+            self.active_requests.set(count as i64);
+        }
     }
 }
 

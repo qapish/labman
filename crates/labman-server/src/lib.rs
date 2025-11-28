@@ -63,12 +63,23 @@ pub struct ServerConfig {
 /// registry, etc.).
 #[derive(Clone)]
 struct AppState {
+    #[cfg(feature = "prometheus")]
+    prometheus: Arc<labman_telemetry::PrometheusMetricsRecorder>,
+
+    #[allow(dead_code)]
     metrics: Arc<dyn MetricsRecorder>,
 }
 
 impl AppState {
     fn new(metrics: Arc<dyn MetricsRecorder>) -> Self {
-        Self { metrics }
+        #[cfg(feature = "prometheus")]
+        let prometheus = Arc::new(labman_telemetry::PrometheusMetricsRecorder::new());
+
+        Self {
+            #[cfg(feature = "prometheus")]
+            prometheus,
+            metrics,
+        }
     }
 }
 
@@ -175,14 +186,10 @@ impl LabmanServer {
 async fn metrics_handler(State(_state): State<AppState>) -> impl IntoResponse {
     #[cfg(feature = "prometheus")]
     {
-        use labman_telemetry::PrometheusMetricsRecorder;
-
-        // NOTE: At the moment we construct a fresh recorder/registry for the
-        // HTTP response. In a later iteration, we should expose the concrete
-        // `PrometheusMetricsRecorder` or its `Registry` from `AppState` so that
-        // metrics recorded by other components are included.
-        let recorder = PrometheusMetricsRecorder::new();
-        let resp = prometheus_http_response(recorder.registry());
+        // Use the shared Prometheus recorder from application state so that
+        // metrics recorded elsewhere in the process are included in the
+        // exported registry.
+        let resp = prometheus_http_response(_state.prometheus.registry());
 
         let (parts, body_bytes) = resp.into_parts();
         let body = axum::body::Body::from(body_bytes);

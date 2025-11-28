@@ -35,7 +35,12 @@ pub struct LabmanConfig {
     pub wireguard: WireGuardConfig,
 
     /// Proxy configuration for the local HTTP interface exposed over the tunnel.
+    /// Proxy configuration for the local HTTP interface.
     pub proxy: ProxyConfig,
+
+    /// Telemetry configuration for logging and metrics.
+    #[serde(default)]
+    pub telemetry: Option<TelemetryConfig>,
 
     /// Logical LLM endpoints this node can use.
     #[serde(default)]
@@ -288,6 +293,31 @@ pub struct ProxyConfig {
     pub listen_addr: Option<String>,
 }
 
+/// Telemetry configuration for logging and metrics.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TelemetryConfig {
+    /// Log level: trace, debug, info, warn, error.
+    ///
+    /// When unset, a sensible default (usually "info") will be used, and may
+    /// be overridden by CLI flags such as --log-level.
+    #[serde(default)]
+    pub log_level: Option<String>,
+
+    /// Log format, e.g. "text" or "json".
+    #[serde(default)]
+    pub log_format: Option<String>,
+
+    /// Whether to enable the Prometheus metrics endpoint.
+    #[serde(default)]
+    pub enable_metrics: bool,
+
+    /// Port for the metrics HTTP endpoint. The actual bind address is
+    /// determined by higher-level components, but this port is used as the
+    /// default when metrics are enabled.
+    #[serde(default = "default_metrics_port")]
+    pub metrics_port: u16,
+}
+
 /// Configuration for a single logical endpoint.
 ///
 /// The scheduler and endpoint management layer will turn these into
@@ -374,6 +404,10 @@ fn default_interface_name() -> String {
 
 fn default_listen_port() -> u16 {
     8080
+}
+
+fn default_metrics_port() -> u16 {
+    9090
 }
 
 /// Compute a short, non-reversible fingerprint for a sensitive token.
@@ -491,6 +525,7 @@ base_url = "http://127.0.0.1:11434/v1"
                 listen_port: 8080,
                 listen_addr: None,
             },
+            telemetry: None,
             endpoints: Vec::new(),
         };
 
@@ -526,6 +561,7 @@ base_url = "http://127.0.0.1:11434/v1"
                 listen_port: 8080,
                 listen_addr: None,
             },
+            telemetry: None,
             endpoints: Vec::new(),
         };
 
@@ -555,6 +591,7 @@ base_url = "http://127.0.0.1:11434/v1"
                 listen_port: 8080,
                 listen_addr: None,
             },
+            telemetry: None,
             endpoints: vec![
                 EndpointConfig {
                     name: "dup".to_string(),

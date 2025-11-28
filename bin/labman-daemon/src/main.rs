@@ -178,7 +178,11 @@ fn resolve_bind_addr(cli: &Cli, cfg: &LabmanConfig) -> Result<SocketAddr, String
     // This allows:
     // - Control plane to reach the node over WireGuard (if routing allows).
     // - Operators to scrape from their network, subject to firewall config.
-    let port = 9090;
+    let port = cfg
+        .telemetry
+        .as_ref()
+        .map(|t| t.metrics_port)
+        .unwrap_or(9090);
 
     Ok(SocketAddr::from(([0, 0, 0, 0], port)))
 }
