@@ -240,7 +240,7 @@ The goal is to reach:
 - [x] Implement `labman-endpoints` with:
   - [x] `EndpointRegistry` struct:
     - [x] Stores a collection of `labman-core::Endpoint`.
-    - [ ] Indexes by name and by model name for fast lookup.
+    - [x] Indexes by model name for fast lookup (via a derived model index).
     - [x] Tracks per-endpoint concurrency limits and active request counts.
   - [x] Initialization:
     - [x] `fn from_config(config: &LabmanConfig) -> Result<EndpointRegistry>`:
@@ -275,33 +275,33 @@ The goal is to reach:
     - [x] `models.include` (glob-based allowlist).
     - [x] `models.exclude` (glob-based denylist).
     - [x] If both present: include first, then exclude.
-  - [ ] Maintain:
-    - [ ] Map `model_name -> Vec<EndpointName>` for scheduling.
+  - [x] Maintain:
+    - [x] Map `model_name -> Vec<EndpointName>` for scheduling.
 
 ### 4.4 Scheduling / Selection Algorithm
 
-- [ ] Implement model-aware routing:
+- [x] Implement model-aware routing (initial skeleton):
 
-  - `fn select_endpoint_for_model(&self, model: &str) -> Result<&Endpoint>`:
+  - `fn select_endpoint_for_model(&self, model: &str) -> Option<(&String, &EndpointEntry)>`:
     - Filter endpoints:
       - Healthy only.
       - Support the model.
       - Respect `max_concurrent` (using current active requests).
     - Use a simple algorithm first:
-      - Round-robin across suitable endpoints.
-      - Or lowest active request count.
+      - Currently returns the first endpoint advertising the model.
+      - Future work: round-robin or lowest active request count.
   - On selection:
     - Increment the active request count.
     - Provide a guard type (RAII) to decrement active count when request completes.
 
 ### 4.5 Control-Plane Capabilities View
 
-- [ ] Provide a function to convert the registry into `NodeCapabilities`:
+- [x] Provide a function to convert the registry into `NodeCapabilities`:
 
   - `fn to_node_capabilities(&self) -> NodeCapabilities`:
-    - Flatten all unique models.
-    - `endpoint_count` = total endpoints.
-    - `max_concurrent_requests` = sum of `max_concurrent` (or heuristic).
+    - [x] Flatten all unique models.
+    - [x] `endpoint_count` = total endpoints.
+    - [x] `max_concurrent_requests` = sum of `max_concurrent` (or heuristic).
 
 ### 4.6 Daemon Integration
 
@@ -329,13 +329,12 @@ The goal is to reach:
 
 ### 5.1 HTTP Server Skeleton
 
-- [ ] Implement `labman-proxy` using `axum` or `hyper`:
+- [x] Implement `labman-proxy` crate with initial HTTP server skeleton:
 
-  - `fn start_proxy(registry: Arc<EndpointRegistry>, listen_addr: SocketAddr, shutdown: ShutdownSignal) -> Result<()>`.
-  - Expose routes:
-    - `POST /v1/chat/completions`
-    - `POST /v1/completions`
-    - `GET /v1/models`
+  - [x] Expose a `/v1/models` route backed by `EndpointRegistry::to_node_capabilities().models`.
+  - [ ] Wire proxy HTTP listener into `labmand`/`labman-server` on the WG-bound address.
+  - [ ] Add `POST /v1/chat/completions`
+  - [ ] Add `POST /v1/completions`
 
 - [ ] Ensure:
   - [ ] Binding is restricted to WG IP/port (address from `WireGuardInterface`).
