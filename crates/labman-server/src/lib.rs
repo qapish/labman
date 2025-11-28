@@ -68,9 +68,7 @@ struct AppState {
 }
 
 impl AppState {
-    fn new(metrics: Arc<dyn MetricsRecorder>) -> Self {
-        let prometheus = Arc::new(PrometheusMetricsRecorder::new());
-
+    fn new(prometheus: Arc<PrometheusMetricsRecorder>, metrics: Arc<dyn MetricsRecorder>) -> Self {
         Self {
             prometheus,
             metrics,
@@ -86,27 +84,23 @@ impl AppState {
 pub struct LabmanServer {
     cfg: ServerConfig,
     metrics_recorder: Arc<dyn MetricsRecorder>,
+    prometheus_recorder: Arc<PrometheusMetricsRecorder>,
 }
 
 impl LabmanServer {
     /// Create a new labman server with the given configuration.
     ///
-    /// By default, this will:
-    /// - Use a Prometheus-backed metrics recorder when the `prometheus` feature
-    ///   is enabled.
-    /// - Fall back to a no-op recorder otherwise.
+    /// Metrics are backed by a single shared `PrometheusMetricsRecorder`
+    /// instance, which is exposed both as a concrete type (for registry access)
+    /// and as a trait object (for generic recording).
     pub fn new(cfg: ServerConfig) -> Self {
-        #[cfg(feature = "prometheus")]
-        let recorder: Arc<dyn MetricsRecorder> =
-            Arc::new(PrometheusMetricsRecorder::new()) as Arc<dyn MetricsRecorder>;
-
-        #[cfg(not(feature = "prometheus"))]
-        let recorder: Arc<dyn MetricsRecorder> =
-            Arc::new(NoopMetricsRecorder::default()) as Arc<dyn MetricsRecorder>;
+        let prometheus = Arc::new(PrometheusMetricsRecorder::new());
+        let metrics_recorder: Arc<dyn MetricsRecorder> = prometheus.clone();
 
         Self {
             cfg,
-            metrics_recorder: recorder,
+            metrics_recorder,
+            prometheus_recorder: prometheus,
         }
     }
 
@@ -116,6 +110,15 @@ impl LabmanServer {
     /// metrics without needing to know which concrete backend is in use.
     pub fn metrics_recorder(&self) -> Arc<dyn MetricsRecorder> {
         Arc::clone(&self.metrics_recorder)
+    }
+
+    /// Get a shared reference to the concrete Prometheus metrics recorder.
+    ///
+    /// This is useful for components that need direct access to the registry
+    /// (for example, to expose additional metrics endpoints or integrate with
+    /// non-trait-based APIs).
+    pub fn prometheus_recorder(&self) -> Arc<PrometheusMetricsRecorder> {
+        Arc::clone(&self.prometheus_recorder)
     }
 
     /// Spawn the HTTP server onto the current Tokio runtime and return a handle.
@@ -137,7 +140,10 @@ impl LabmanServer {
 
         info!("labman-server: binding HTTP server on {}", addr);
 
-        let state = AppState::new(self.metrics_recorder.clone());
+        let state = AppState::new(
+            self.prometheus_recorder.clone(),
+            self.metrics_recorder.clone(),
+        );
 
         let app = Router::new()
             .route("/metrics", get(metrics_handler))
@@ -197,9 +203,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_not_found_for_unknown_path() {
-        let recorder: Arc<dyn MetricsRecorder> =
-            Arc::new(NoopMetricsRecorder::default()) as Arc<dyn MetricsRecorder>;
-        let state = AppState::new(recorder);
+        let prometheus = Arc::new(PrometheusMetricsRecorder::new());
+        let recorder: Arc<dyn MetricsRecorder> = prometheus.clone();
+        let state = AppState::new(prometheus, recorder);
 
         let app = Router::new()
             .route("/metrics", get(metrics_handler))
