@@ -11,12 +11,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
+use hyper_util::rt::TokioIo;
 use labman_core::ModelDescriptor;
 use labman_endpoints::EndpointRegistry;
 use labman_telemetry::MetricsRecorder;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 use tracing::{error, info};
 
@@ -36,6 +37,36 @@ impl std::fmt::Display for ProxyError {
 }
 
 impl std::error::Error for ProxyError {}
+
+/// Minimal representation of an OpenAI-style chat completion message.
+///
+/// This is intentionally minimal and currently only used for deserializing and
+/// forwarding requests; additional fields can be added later as needed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+/// Minimal representation of an OpenAI-style chat completion request.
+///
+/// For now, we only care about:
+/// - `model`: used to select an endpoint via `EndpointRegistry`.
+/// - `messages`: forwarded as-is to the upstream.
+/// - `stream`: determines whether we expect a streaming response.
+///
+/// All other fields are captured in `extra` and forwarded unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatCompletionRequest {
+    pub model: String,
+    #[serde(default)]
+    pub messages: Vec<ChatMessage>,
+    #[serde(default)]
+    pub stream: Option<bool>,
+
+    #[serde(flatten)]
+    pub extra: serde_json::Value,
+}
 
 /// Application state shared across HTTP handlers.
 ///
@@ -90,6 +121,7 @@ impl ProxyServer {
     fn router(&self) -> Router {
         Router::new()
             .route("/v1/models", get(get_models))
+            .route("/v1/chat/completions", post(post_chat_completions))
             .with_state(self.state.clone())
     }
 
@@ -178,6 +210,125 @@ async fn get_models(State(state): State<ProxyState>) -> Json<ModelsResponse> {
         object: "list".to_string(),
         data: models,
     })
+}
+
+/// Handler for `POST /v1/chat/completions`.
+///
+/// This:
+/// - Parses the incoming request as `ChatCompletionRequest`.
+/// - Uses `EndpointRegistry::select_endpoint_for_model` to choose an upstream.
+/// - Proxies the request body to the selected endpoint's `/chat/completions`.
+/// - Streams or buffers the response back to the caller, depending on `stream`.
+async fn post_chat_completions(
+    State(state): State<ProxyState>,
+    axum::Json(req_body): axum::Json<ChatCompletionRequest>,
+) -> Result<axum::response::Response, axum::http::StatusCode> {
+    let model_id = req_body.model.clone();
+
+    // Select an appropriate endpoint for the requested model.
+    let (endpoint_name, endpoint_base_url) = {
+        let registry = state.registry.lock().await;
+        if let Some((name, entry)) = registry.select_endpoint_for_model(&model_id) {
+            (name.clone(), entry.endpoint.base_url.clone())
+        } else {
+            // No endpoint exposes this model.
+            state.metrics.record_error(None, "model_not_found");
+            return Err(axum::http::StatusCode::BAD_REQUEST);
+        }
+    };
+
+    let base = endpoint_base_url.trim_end_matches('/');
+    let upstream_url = format!("{}/chat/completions", base);
+
+    // Forward the request to the selected upstream using reqwest.
+    let client = reqwest::Client::new();
+
+    let started = std::time::Instant::now();
+    let upstream_resp = match client.post(&upstream_url).json(&req_body).send().await {
+        Ok(resp) => resp,
+        Err(err) => {
+            tracing::warn!(
+                "proxy: error forwarding chat completion to endpoint '{}': {}",
+                endpoint_name,
+                err
+            );
+            state
+                .metrics
+                .record_error(Some(endpoint_name.as_str()), "upstream_request_error");
+            return Err(axum::http::StatusCode::BAD_GATEWAY);
+        }
+    };
+
+    let status = upstream_resp.status();
+    let headers = upstream_resp.headers().clone();
+
+    // Decide whether this is streaming based on the original request.
+    let is_streaming = req_body.stream.unwrap_or(false);
+
+    if is_streaming {
+        // Streaming: pipe the bytes stream from upstream to the client.
+        let stream = upstream_resp.bytes_stream();
+        let body = axum::body::Body::from_stream(stream);
+
+        let mut response = axum::response::Response::new(body);
+        *response.status_mut() = status;
+
+        // Copy selected headers through (e.g. content-type, transfer-encoding).
+        let response_headers = response.headers_mut();
+        for (k, v) in headers.iter() {
+            if k == axum::http::header::CONTENT_LENGTH {
+                continue;
+            }
+            response_headers.insert(k, v.clone());
+        }
+
+        let latency = started.elapsed().as_secs_f64();
+        state.metrics.record_request_end(
+            Some(endpoint_name.as_str()),
+            Some(model_id.as_str()),
+            status.is_success(),
+            Some(latency),
+        );
+
+        Ok(response)
+    } else {
+        // Non-streaming: buffer the entire response body and return it.
+        let bytes = match upstream_resp.bytes().await {
+            Ok(b) => b,
+            Err(err) => {
+                tracing::warn!(
+                    "proxy: error reading upstream chat completion body from '{}': {}",
+                    endpoint_name,
+                    err
+                );
+                state
+                    .metrics
+                    .record_error(Some(endpoint_name.as_str()), "upstream_body_read_error");
+                return Err(axum::http::StatusCode::BAD_GATEWAY);
+            }
+        };
+
+        let latency = started.elapsed().as_secs_f64();
+        state.metrics.record_request_end(
+            Some(endpoint_name.as_str()),
+            Some(model_id.as_str()),
+            status.is_success(),
+            Some(latency),
+        );
+
+        let mut response = axum::response::Response::new(axum::body::Body::from(bytes));
+        *response.status_mut() = status;
+
+        let response_headers = response.headers_mut();
+        for (k, v) in headers.iter() {
+            if k == axum::http::header::CONTENT_LENGTH {
+                continue;
+            }
+            response_headers.insert(k, v.clone());
+        }
+
+        Ok(response)
+    }
 }
 
 #[cfg(test)]
