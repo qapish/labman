@@ -7,3 +7,16 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+labman-core = { path = "../labman-core" }
+labman-endpoints = { path = "../labman-endpoints" }
+labman-telemetry = { path = "../labman-telemetry" }
+labman-config = { path = "../labman-config" }
+
+tokio = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { version = "0.1", features = ["server", "tokio"] }
+axum = { workspace = true }
+tower = { workspace = true }
+tracing = { workspace = true }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

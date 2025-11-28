@@ -828,6 +828,20 @@ dependencies = [
 [[package]]
 name = "labman-proxy"
 version = "0.0.1"
+dependencies = [
+ "axum",
+ "hyper",
+ "hyper-util",
+ "labman-config",
+ "labman-core",
+ "labman-endpoints",
+ "labman-telemetry",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tracing",
+]
 
 [[package]]
 name = "labman-server"
