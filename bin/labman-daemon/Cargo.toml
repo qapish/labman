@@ -7,3 +7,6 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+labman-core = { path = "../../crates/labman-core" }
+labman-config = { path = "../../crates/labman-config" }
+clap = { version = "4.5", features = ["derive"] }
