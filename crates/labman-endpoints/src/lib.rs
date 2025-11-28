@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use labman_config::{EndpointConfig, LabmanConfig};
 use labman_core::endpoint::Endpoint;
-use labman_core::{LabmanError, Result};
+use labman_core::{LabmanError, ModelDescriptor, ModelListResponse, Result};
 use labman_telemetry::MetricsRecorder;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -77,6 +77,12 @@ pub struct EndpointEntry {
     /// For now this is managed purely by the registry's health check methods
     /// and not yet exposed externally.
     healthy: bool,
+
+    /// Models discovered from this endpoint via `/v1/models`.
+    ///
+    /// This will be populated by model discovery logic and used for routing
+    /// decisions and capability reporting.
+    discovered_models: Vec<ModelDescriptor>,
 }
 
 impl EndpointRegistry {
@@ -107,6 +113,7 @@ impl EndpointRegistry {
                 meta,
                 active_requests: 0,
                 healthy: false,
+                discovered_models: Vec::new(),
             };
 
             endpoints.insert(ep_cfg.name.clone(), entry);
@@ -246,6 +253,105 @@ impl EndpointRegistry {
         Ok(())
     }
 
+    /// Discover models from all healthy endpoints via `/v1/models`.
+    ///
+    /// For each endpoint:
+    /// - Skips if `healthy == false`.
+    /// - Issues a GET to `{base_url}/models` or `{base_url}/v1/models` depending
+    ///   on whether `base_url` already ends with `/v1`.
+    /// - Parses the response into `ModelListResponse`.
+    /// - Applies `models_include` / `models_exclude` filters.
+    /// - Populates `discovered_models` with the filtered list.
+    pub async fn discover_models_all_http(&mut self) -> Result<()> {
+        let client = reqwest::Client::new();
+
+        for (name, entry) in self.endpoints.iter_mut() {
+            if !entry.healthy {
+                tracing::warn!(
+                    "skipping model discovery for unhealthy endpoint '{}'",
+                    entry.endpoint.name
+                );
+                continue;
+            }
+
+            let base_url = entry.endpoint.base_url.trim_end_matches('/');
+            let models_url = if base_url.ends_with("/v1") {
+                format!("{}/models", base_url)
+            } else {
+                format!("{}/v1/models", base_url)
+            };
+
+            let resp = client.get(&models_url).send().await;
+
+            let list: ModelListResponse = match resp {
+                Ok(r) if r.status().is_success() => match r.json().await {
+                    Ok(json) => json,
+                    Err(e) => {
+                        tracing::warn!(
+                            "endpoint '{}' model discovery JSON parse error: {}",
+                            entry.endpoint.name,
+                            e
+                        );
+                        if let Some(metrics) = &self.metrics {
+                            metrics.record_error(Some(name.as_str()), "model_discovery_parse");
+                        }
+                        continue;
+                    }
+                },
+                Ok(r) => {
+                    tracing::warn!(
+                        "endpoint '{}' model discovery HTTP {}",
+                        entry.endpoint.name,
+                        r.status()
+                    );
+                    if let Some(metrics) = &self.metrics {
+                        metrics.record_error(Some(name.as_str()), "model_discovery_http_status");
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "endpoint '{}' model discovery request error: {}",
+                        entry.endpoint.name,
+                        e
+                    );
+                    if let Some(metrics) = &self.metrics {
+                        metrics.record_error(Some(name.as_str()), "model_discovery_error");
+                    }
+                    continue;
+                }
+            };
+
+            let mut models = list.data;
+
+            // Apply include filter
+            if let Some(include) = &entry.meta.models_include {
+                models.retain(|m| {
+                    include
+                        .iter()
+                        .any(|pat| glob_match(pat.as_str(), m.id.as_str()))
+                });
+            }
+
+            // Apply exclude filter
+            if let Some(exclude) = &entry.meta.models_exclude {
+                models.retain(|m| {
+                    !exclude
+                        .iter()
+                        .any(|pat| glob_match(pat.as_str(), m.id.as_str()))
+                });
+            }
+
+            entry.discovered_models = models;
+
+            if let Some(metrics) = &self.metrics {
+                metrics.record_request_end(Some(name.as_str()), None, true, None);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Spawn a periodic HTTP-based health checker.
     ///
     /// This is intended to be called from an async context with a shared
@@ -329,6 +435,46 @@ impl EndpointRegistryBuilder {
         registry.metrics = self.metrics;
         Ok(registry)
     }
+}
+
+/// Very small glob matcher for `*` wildcard on the model ID.
+///
+/// This is intentionally minimal and can be replaced with a more robust
+/// implementation later if needed.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    // Simple cases first
+    if pattern == "*" {
+        return true;
+    }
+    // Split on '*' and ensure the segments appear in order.
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        return pattern == text;
+    }
+
+    // Match prefix
+    if !text.starts_with(parts[0]) {
+        return false;
+    }
+
+    let mut remainder = &text[parts[0].len()..];
+
+    // Match middle segments
+    for part in &parts[1..parts.len() - 1] {
+        if let Some(idx) = remainder.find(part) {
+            remainder = &remainder[idx + part.len()..];
+        } else {
+            return false;
+        }
+    }
+
+    // Match suffix
+    let last = parts.last().unwrap();
+    if !last.is_empty() && !remainder.ends_with(last) {
+        return false;
+    }
+
+    true
 }
 
 #[cfg(test)]

@@ -5,3 +5,4 @@ target
 *.pdb
 **/mutants.out*/
 .implementation/*
+.*.toml
