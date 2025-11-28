@@ -4,6 +4,7 @@ use std::process;
 use clap::{ArgAction, Parser};
 use labman_config::{load_default, load_from_path, LabmanConfig};
 use labman_core::LabmanError;
+use labman_telemetry;
 
 /// labmand - labman daemon
 ///
@@ -36,6 +37,13 @@ struct Cli {
     #[arg(long = "config", short = 'c', value_name = "PATH")]
     config: Option<PathBuf>,
 
+    /// Log level for labmand (overrides RUST_LOG if set).
+    ///
+    /// Accepts standard tracing levels (trace, debug, info, warn, error) or a
+    /// full filter expression (e.g. "info,labmand=debug").
+    #[arg(long = "log-level", short = 'L', value_name = "LEVEL")]
+    log_level: Option<String>,
+
     /// Print loaded configuration summary and exit without starting the daemon.
     ///
     /// This is primarily useful for debugging configuration issues.
@@ -52,6 +60,14 @@ struct Cli {
 
 fn main() {
     let cli = Cli::parse();
+
+    // Initialise telemetry as early as possible so subsequent logs use the
+    // configured subscriber. CLI-provided log level, if any, takes precedence
+    // over RUST_LOG.
+    if let Err(err) = labman_telemetry::init(cli.log_level.as_deref()) {
+        eprintln!("labmand: failed to initialise telemetry: {}", err);
+        process::exit(1);
+    }
 
     let config_result: Result<LabmanConfig, LabmanError> = if let Some(path) = cli.config {
         match load_from_path(&path) {
