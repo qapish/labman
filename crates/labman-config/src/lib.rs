@@ -55,6 +55,40 @@ impl LabmanConfig {
         Ok(())
     }
 
+    /// Build a `NodeInfo` from this configuration and the provided capabilities.
+    ///
+    /// This helper is intended for use by the control-plane client / daemon when
+    /// constructing registration requests. It:
+    /// - Uses a provisional node ID derived from the control-plane node token.
+    ///   The control plane may override this with its own canonical ID.
+    /// - Fills region and description from the configuration if present.
+    pub fn to_node_info(
+        &self,
+        capabilities: labman_core::NodeCapabilities,
+    ) -> labman_core::NodeInfo {
+        // For now we derive a stable, human-readable provisional ID from the
+        // node token. This avoids exposing the raw token while still giving the
+        // control plane a consistent identity string prior to assignment of a
+        // canonical ID.
+        //
+        // The control plane is free to replace this ID in its response.
+        let provisional_id = format!(
+            "node-{}",
+            crate::short_token_fingerprint(&self.control_plane.node_token)
+        );
+
+        let mut info = labman_core::NodeInfo::new(provisional_id, capabilities);
+
+        if let Some(region) = &self.control_plane.region {
+            info = info.with_region(region.clone());
+        }
+        if let Some(description) = &self.control_plane.description {
+            info = info.with_description(description.clone());
+        }
+
+        info
+    }
+
     fn validate_control_plane(&self) -> Result<()> {
         if self.control_plane.base_url.trim().is_empty() {
             return Err(LabmanError::invalid_config(
@@ -342,6 +376,27 @@ fn default_listen_port() -> u16 {
     8080
 }
 
+/// Compute a short, non-reversible fingerprint for a sensitive token.
+///
+/// This is intentionally lossy and only used for deriving a provisional,
+/// human-readable node identifier from a secret token. It avoids exposing the
+/// raw token value in logs or control-plane identifiers while remaining stable
+/// for a given token.
+///
+/// The implementation uses a simple, deterministic hash; it is **not** meant
+/// to provide cryptographic security guarantees.
+fn short_token_fingerprint(token: &str) -> String {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    token.hash(&mut hasher);
+    let hash = hasher.finish();
+
+    // 12 hex characters is enough to avoid collisions in realistic deployments
+    // while keeping the ID reasonably short.
+    format!("{:012x}", hash)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,6 +458,50 @@ base_url = "http://127.0.0.1:11434/v1"
     fn test_missing_file_errors() {
         let res = load_from_path("/this/definitely/does/not/exist.toml");
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_short_token_fingerprint_is_stable_and_short() {
+        let t1 = "secret-token-value";
+        let f1 = crate::short_token_fingerprint(t1);
+        let f2 = crate::short_token_fingerprint(t1);
+        assert_eq!(f1, f2);
+        assert!(f1.len() <= 16);
+    }
+
+    #[test]
+    fn test_to_node_info_uses_region_and_description() {
+        let cfg = LabmanConfig {
+            control_plane: ControlPlaneConfig {
+                base_url: "https://control.example.com/api/v1".to_string(),
+                node_token: "token-123".to_string(),
+                region: Some("edge-eu-west".to_string()),
+                description: Some("Edge node".to_string()),
+            },
+            wireguard: WireGuardConfig {
+                interface_name: "labman0".to_string(),
+                address: None,
+                private_key_path: None,
+                public_key_path: None,
+                peer_endpoint: None,
+                allowed_ips: Vec::new(),
+                rosenpass: None,
+            },
+            proxy: ProxyConfig {
+                listen_port: 8080,
+                listen_addr: None,
+            },
+            endpoints: Vec::new(),
+        };
+
+        let caps = labman_core::NodeCapabilities::new(Vec::new(), 0);
+        let info = cfg.to_node_info(caps);
+
+        assert_eq!(info.region, Some("edge-eu-west".to_string()));
+        assert_eq!(info.description, Some("Edge node".to_string()));
+        // ID should be non-empty and derived from the token, but we don't assert
+        // the exact value here to avoid coupling tests to the hash format.
+        assert!(!info.id.is_empty());
     }
 
     #[test]
