@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process;
 
@@ -5,6 +6,7 @@ use clap::{ArgAction, Parser};
 use labman_config::{load_default, load_from_path, LabmanConfig};
 use labman_core::LabmanError;
 use labman_telemetry;
+use tracing::warn;
 
 /// labmand - labman daemon
 ///
@@ -50,6 +52,15 @@ struct Cli {
     #[arg(long = "print-config", action = ArgAction::SetTrue)]
     print_config: bool,
 
+    /// Start a minimal metrics HTTP server and then exit.
+    ///
+    /// This is an early stub used to verify that the `/metrics` endpoint can be
+    /// reached by the control plane over WireGuard and by an operator's
+    /// Prometheus/Grafana stack on their local network (subject to routing and
+    /// firewall configuration).
+    #[arg(long = "serve-metrics", value_name = "ADDR", requires = "print_config")]
+    serve_metrics: Option<String>,
+
     /// Validate configuration and exit without starting the daemon.
     ///
     /// This is useful for CI and deployment pipelines to ensure configuration
@@ -72,12 +83,12 @@ fn main() {
     let config_result: Result<LabmanConfig, LabmanError> = if let Some(path) = cli.config {
         match load_from_path(&path) {
             Ok(cfg) => {
-                eprintln!("labmand: loaded configuration from {}", path.display());
+                tracing::info!("loaded configuration from {}", path.display());
                 Ok(cfg)
             }
             Err(err) => {
-                eprintln!(
-                    "labmand: failed to load configuration from {}: {}",
+                tracing::error!(
+                    "failed to load configuration from {}: {}",
                     path.display(),
                     err
                 );
@@ -87,11 +98,11 @@ fn main() {
     } else {
         match load_default() {
             Ok(cfg) => {
-                eprintln!("labmand: loaded configuration from default locations");
+                tracing::info!("loaded configuration from default locations");
                 Ok(cfg)
             }
             Err(err) => {
-                eprintln!("labmand: failed to load configuration from default locations: {err}");
+                tracing::error!("failed to load configuration from default locations: {err}");
                 Err(err)
             }
         }
@@ -107,17 +118,41 @@ fn main() {
 
     // Perform structural validation before any further processing.
     if let Err(err) = config.validate() {
-        eprintln!("labmand: configuration validation failed: {}", err);
+        tracing::error!("configuration validation failed: {}", err);
         process::exit(1);
     }
 
     if cli.check_config {
         // Configuration loaded and validated successfully; exit cleanly.
-        eprintln!("labmand: configuration is valid");
+        tracing::info!("configuration is valid");
+        return;
+    }
+
+    if let Some(addr_str) = cli.serve_metrics.as_deref() {
+        // This is a stub implementation that only logs the intended bind
+        // address for the metrics server. In a later stage, this will be
+        // replaced by an async HTTP listener that serves `/metrics` backed by
+        // Prometheus.
+        match addr_str.parse::<SocketAddr>() {
+            Ok(addr) => {
+                tracing::info!(
+                    "metrics server stub would bind on {} for control plane and operator scrapers",
+                    addr
+                );
+            }
+            Err(err) => {
+                tracing::error!("invalid metrics bind address '{}': {}", addr_str, err);
+                process::exit(1);
+            }
+        }
+
+        // In stub mode, we do not actually start a server; we just exit after
+        // confirming the address is syntactically valid.
         return;
     }
 
     if cli.print_config {
+        tracing::info!("starting labmand with loaded configuration");
         print_config_summary(&config);
         // For now we just exit after printing.
         return;
