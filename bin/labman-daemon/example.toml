@@ -105,9 +105,13 @@ log_level = "info"
 # Log format: "text" or "json" (the latter is useful in container environments).
 log_format = "text"
 
-# Enable Prometheus metrics endpoint. labman-server will expose /metrics on the
-# HTTP server bound by labmand.
-enable_metrics = true
+# Disable Prometheus metrics endpoint. Metrics are enabled by default because
+# they are essential for validating that labman instances and endpoints are
+# functioning efficiently and for evaluating operator performance. Operators
+# can opt out by setting this flag to true, but doing so may impact their
+# compensation as the control plane will have reduced visibility into their
+# contributions.
+disable_metrics = false
 
 # Port for the metrics HTTP endpoint. When running with the default settings,
 # labmand will currently bind on 0.0.0.0:<metrics_port>.

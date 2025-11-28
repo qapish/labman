@@ -307,9 +307,15 @@ pub struct TelemetryConfig {
     #[serde(default)]
     pub log_format: Option<String>,
 
-    /// Whether to enable the Prometheus metrics endpoint.
+    /// Whether to disable the Prometheus metrics endpoint.
+    ///
+    /// Metrics are enabled by default because they are essential for validating
+    /// that labman instances and endpoints are functioning efficiently and for
+    /// evaluating operator performance. Operators can opt out by setting this
+    /// flag to true, but doing so may impact their compensation as the control
+    /// plane will have reduced visibility into their contributions.
     #[serde(default)]
-    pub enable_metrics: bool,
+    pub disable_metrics: bool,
 
     /// Port for the metrics HTTP endpoint. The actual bind address is
     /// determined by higher-level components, but this port is used as the

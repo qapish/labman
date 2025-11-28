@@ -174,10 +174,26 @@ fn resolve_bind_addr(cli: &Cli, cfg: &LabmanConfig) -> Result<SocketAddr, String
             .map_err(|e| format!("failed to parse --bind-addr '{}': {}", addr_str, e));
     }
 
-    // Fallback: use metrics_port from config, bind on all interfaces.
-    // This allows:
+    // Fallback: use metrics_port from config, bind on all interfaces, but only
+    // if metrics are not explicitly disabled. This allows:
     // - Control plane to reach the node over WireGuard (if routing allows).
     // - Operators to scrape from their network, subject to firewall config.
+    //
+    // Metrics are enabled by default; operators may opt out by setting
+    // telemetry.disable_metrics = true.
+    let metrics_enabled = cfg
+        .telemetry
+        .as_ref()
+        .map(|t| !t.disable_metrics)
+        .unwrap_or(true);
+
+    if !metrics_enabled {
+        return Err(
+            "metrics are disabled via telemetry.disable_metrics; no HTTP bind address configured"
+                .to_string(),
+        );
+    }
+
     let port = cfg
         .telemetry
         .as_ref()
