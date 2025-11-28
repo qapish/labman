@@ -4,3 +4,5 @@ target
 **/*.rs.bk
 *.pdb
 **/mutants.out*/
+
+**/*.md
