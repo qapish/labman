@@ -11,6 +11,7 @@ labman-core = { path = "../../crates/labman-core" }
 labman-config = { path = "../../crates/labman-config" }
 labman-telemetry = { path = "../../crates/labman-telemetry" }
 labman-server = { path = "../../crates/labman-server" }
+labman-endpoints = { path = "../../crates/labman-endpoints" }
 tracing = "0.1"
 tokio = { version = "1.0", features = ["rt-multi-thread"] }
 clap = { version = "4.5", features = ["derive"] }

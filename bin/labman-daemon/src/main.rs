@@ -5,8 +5,10 @@ use std::process;
 use clap::{ArgAction, Parser};
 use labman_config::{load_default, load_from_path, LabmanConfig};
 use labman_core::LabmanError;
+use labman_endpoints::EndpointRegistry;
 use labman_server::{LabmanServer, ServerConfig};
 use labman_telemetry;
+use tracing::warn;
 
 /// labmand - labman daemon
 ///
@@ -136,6 +138,26 @@ fn main() {
         print_config_summary(&config);
         // For now we just exit after printing.
         // Note: printing config does not currently start the HTTP server.
+    }
+
+    // Build the endpoint registry from configuration so that core model-serving
+    // state is available early, even before WireGuard/proxy layers are added.
+    match EndpointRegistry::from_config(&config) {
+        Ok(registry) => {
+            tracing::info!("configured {} endpoints", registry.len());
+            for (name, entry) in registry.iter() {
+                tracing::info!(
+                    "endpoint '{}' -> base_url={}, max_concurrent={:?}",
+                    name,
+                    entry.endpoint.base_url,
+                    entry.meta.max_concurrent
+                );
+            }
+        }
+        Err(err) => {
+            tracing::error!("failed to build endpoint registry from config: {}", err);
+            process::exit(1);
+        }
     }
 
     // Determine the bind address for the labman HTTP server (including /metrics).
