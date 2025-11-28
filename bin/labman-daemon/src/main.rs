@@ -142,7 +142,7 @@ fn main() {
 
     // Build the endpoint registry from configuration so that core model-serving
     // state is available early, even before WireGuard/proxy layers are added.
-    match EndpointRegistry::from_config(&config) {
+    let mut registry = match EndpointRegistry::from_config(&config) {
         Ok(registry) => {
             tracing::info!("configured {} endpoints", registry.len());
             for (name, entry) in registry.iter() {
@@ -153,11 +153,19 @@ fn main() {
                     entry.meta.max_concurrent
                 );
             }
+            registry
         }
         Err(err) => {
             tracing::error!("failed to build endpoint registry from config: {}", err);
             process::exit(1);
         }
+    };
+
+    // Perform an initial health check pass so that downstream components
+    // (proxy, control-plane reporting) can rely on basic health status.
+    if let Err(err) = registry.health_check_all() {
+        tracing::error!("initial endpoint health check failed: {}", err);
+        process::exit(1);
     }
 
     // Determine the bind address for the labman HTTP server (including /metrics).

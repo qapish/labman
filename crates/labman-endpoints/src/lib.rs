@@ -57,8 +57,14 @@ pub struct EndpointEntry {
     /// Static configuration metadata (concurrency limits, filters).
     pub meta: EndpointMeta,
 
-    /// Current number of active requests (for scheduling).
+    /// Current number of active requests (for scheduling, not yet used).
     active_requests: usize,
+
+    /// Whether this endpoint is currently considered healthy.
+    ///
+    /// For now this is managed purely by the registry's health check methods
+    /// and not yet exposed externally.
+    healthy: bool,
 }
 
 impl EndpointRegistry {
@@ -88,6 +94,7 @@ impl EndpointRegistry {
                 endpoint,
                 meta,
                 active_requests: 0,
+                healthy: false,
             };
 
             endpoints.insert(ep_cfg.name.clone(), entry);
@@ -145,6 +152,27 @@ impl EndpointRegistry {
         // For now we assume the caller has validated the `/v1` suffix. Later we
         // can normalise base URLs here if necessary.
         Ok(Endpoint::new(&cfg.name, &base_url.to_string()))
+    }
+
+    /// Perform a basic health check for all configured endpoints.
+    ///
+    /// This initial implementation is deliberately conservative and does not
+    /// contact the upstream endpoints yet. Instead, it:
+    ///
+    /// - Marks all endpoints as healthy.
+    /// - Emits log/metric hooks in a single place so that future iterations
+    ///   can add real HTTP-based health checks and model discovery without
+    ///   changing the call sites.
+    pub fn health_check_all(&mut self) -> Result<()> {
+        for (_name, entry) in self.endpoints.iter_mut() {
+            // Placeholder: in a future iteration we will:
+            // - Perform an HTTP health probe and/or GET /v1/models.
+            // - Update `entry.healthy` based on the outcome.
+            // - Record success/failure metrics via a MetricsRecorder.
+            entry.healthy = true;
+        }
+
+        Ok(())
     }
 }
 
