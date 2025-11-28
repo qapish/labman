@@ -8,12 +8,11 @@ repository.workspace = true
 
 [features]
 default = []
-prometheus = ["dep:prometheus", "dep:hyper", "dep:tokio"]
 
 [dependencies]
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time"] }
 time = { version = "0.3", features = ["local-offset", "formatting"] }
-prometheus = { version = "0.13", default-features = false, features = ["process"], optional = true }
-hyper = { version = "1.0", features = ["server"], optional = true }
-tokio = { version = "1.0", features = ["rt-multi-thread", "macros"], optional = true }
+prometheus = { version = "0.13", default-features = false, features = ["process"] }
+hyper = { version = "1.0", features = ["server"] }
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros"] }

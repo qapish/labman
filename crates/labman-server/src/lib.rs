@@ -1,21 +1,19 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{response::IntoResponse, Router};
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
-use labman_telemetry::{MetricsRecorder, NoopMetricsRecorder};
+use labman_telemetry::{
+    prometheus_impl::prometheus_http_response, MetricsRecorder, NoopMetricsRecorder,
+    PrometheusMetricsRecorder,
+};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tracing::{error, info};
-
-#[cfg(feature = "prometheus")]
-use labman_telemetry::{prometheus_http_response, PrometheusMetricsRecorder};
 
 /// Error type for the HTTP server.
 ///
@@ -63,8 +61,7 @@ pub struct ServerConfig {
 /// registry, etc.).
 #[derive(Clone)]
 struct AppState {
-    #[cfg(feature = "prometheus")]
-    prometheus: Arc<labman_telemetry::PrometheusMetricsRecorder>,
+    prometheus: Arc<PrometheusMetricsRecorder>,
 
     #[allow(dead_code)]
     metrics: Arc<dyn MetricsRecorder>,
@@ -72,11 +69,9 @@ struct AppState {
 
 impl AppState {
     fn new(metrics: Arc<dyn MetricsRecorder>) -> Self {
-        #[cfg(feature = "prometheus")]
-        let prometheus = Arc::new(labman_telemetry::PrometheusMetricsRecorder::new());
+        let prometheus = Arc::new(PrometheusMetricsRecorder::new());
 
         Self {
-            #[cfg(feature = "prometheus")]
             prometheus,
             metrics,
         }
@@ -180,38 +175,24 @@ impl LabmanServer {
 
 /// Handler for `GET /metrics`.
 ///
-/// When the `prometheus` feature is enabled, this returns a Prometheus text
-/// exposition payload backed by the internal registry. Otherwise, we return a
-/// 501 to signal that metrics support is not compiled in.
-async fn metrics_handler(State(_state): State<AppState>) -> impl IntoResponse {
-    #[cfg(feature = "prometheus")]
-    {
-        // Use the shared Prometheus recorder from application state so that
-        // metrics recorded elsewhere in the process are included in the
-        // exported registry.
-        let resp = prometheus_http_response(_state.prometheus.registry());
+/// This returns a Prometheus text exposition payload backed by the shared
+/// registry stored in application state.
+async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
+    // Use the shared Prometheus recorder from application state so that
+    // metrics recorded elsewhere in the process are included in the
+    // exported registry.
+    let resp = prometheus_http_response(state.prometheus.registry());
 
-        let (parts, body_bytes) = resp.into_parts();
-        let body = axum::body::Body::from(body_bytes);
+    let (parts, body_bytes) = resp.into_parts();
+    let body = axum::body::Body::from(body_bytes);
 
-        (parts.status, parts.headers, body).into_response()
-    }
-
-    #[cfg(not(feature = "prometheus"))]
-    {
-        (
-            StatusCode::NOT_IMPLEMENTED,
-            [("Content-Type", "text/plain; charset=utf-8")],
-            Bytes::from_static(b"Prometheus metrics not enabled\n"),
-        )
-            .into_response()
-    }
+    (parts.status, parts.headers, body).into_response()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::Request;
+    use axum::http::{Request, StatusCode};
     use tower::util::ServiceExt; // for `oneshot`
 
     #[tokio::test]

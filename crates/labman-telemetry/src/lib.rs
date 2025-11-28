@@ -8,17 +8,14 @@ use tracing_subscriber::fmt;
 use tracing_subscriber::fmt::time::OffsetTime;
 use tracing_subscriber::prelude::*;
 
-/// Re-export the Prometheus-backed metrics recorder when the `prometheus`
-/// feature is enabled so that other crates can depend on a concrete type.
-#[cfg(feature = "prometheus")]
+/// Re-export the Prometheus-backed metrics recorder so that other crates can
+/// depend on a concrete type without any feature gating.
 pub use crate::prometheus_impl::PrometheusMetricsRecorder;
 
-#[cfg(feature = "prometheus")]
 use prometheus::{
     Encoder, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, Opts, Registry, TextEncoder,
 };
 
-#[cfg(feature = "prometheus")]
 use hyper::{body::Bytes, Response};
 
 /// Error type for telemetry initialisation failures.
@@ -149,11 +146,9 @@ impl MetricsRecorder for NoopMetricsRecorder {
     fn set_active_requests(&self, _count: u64) {}
 }
 
-#[cfg(feature = "prometheus")]
-mod prometheus_impl {
+pub mod prometheus_impl {
     use super::*;
 
-    #[cfg(feature = "prometheus")]
     /// Prometheus HTTP metrics handler.
     ///
     /// This function encodes the given registry into Prometheus' text exposition

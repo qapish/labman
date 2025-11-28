@@ -8,12 +8,11 @@ repository.workspace = true
 
 [features]
 default = []
-prometheus = []
 
 [dependencies]
 labman-core = { path = "../labman-core" }
 labman-config = { path = "../labman-config" }
-labman-telemetry = { path = "../labman-telemetry", features = ["prometheus"] }
+labman-telemetry = { path = "../labman-telemetry" }
 
 tokio = { workspace = true }
 hyper = { workspace = true }
