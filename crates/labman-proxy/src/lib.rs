@@ -107,6 +107,20 @@ impl ProxyServer {
         Self { cfg, state }
     }
 
+    /// Create a new proxy server using an existing shared `EndpointRegistry`.
+    ///
+    /// This is useful when the registry is already wrapped in an
+    /// `Arc<tokio::sync::Mutex<_>>` and used by other components such as
+    /// periodic health checks or control-plane reporting.
+    pub fn from_shared(
+        cfg: ProxyConfig,
+        registry: Arc<tokio::sync::Mutex<EndpointRegistry>>,
+        metrics: Arc<dyn MetricsRecorder>,
+    ) -> Self {
+        let state = ProxyState { registry, metrics };
+        Self { cfg, state }
+    }
+
     /// Return the shared registry handle.
     pub fn registry(&self) -> Arc<tokio::sync::Mutex<EndpointRegistry>> {
         Arc::clone(&self.state.registry)

@@ -254,7 +254,7 @@ fn run_server_blocking(
             }
         };
 
-        // Wrap the registry so that background tasks can mutate it.
+        // Wrap the registry so that background tasks and the proxy can mutate it.
         let registry = Arc::new(tokio::sync::Mutex::new(registry));
 
         // Perform an initial HTTP-based health check pass so that downstream
@@ -301,28 +301,10 @@ fn run_server_blocking(
             listen_addr: proxy_addr,
         };
 
-        // Build a proxy server with a fresh EndpointRegistry using the same
-        // configuration and shared metrics recorder. This keeps the proxy
-        // decoupled from the metrics server while still sharing telemetry.
-        let proxy_registry = match EndpointRegistryBuilder::new(config.clone())
-            .with_metrics(server.metrics_recorder())
-            .build()
-        {
-            Ok(registry) => registry,
-            Err(err) => {
-                tracing::error!(
-                    "failed to build proxy endpoint registry from config: {}",
-                    err
-                );
-                return Err::<(), Box<dyn std::error::Error>>(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    err.to_string(),
-                )));
-            }
-        };
-
+        // Build a proxy server using the shared EndpointRegistry so that
+        // health checks and model discovery are visible to the proxy.
         let proxy_server =
-            LabmanProxyServer::new(proxy_cfg, proxy_registry, server.metrics_recorder());
+            LabmanProxyServer::from_shared(proxy_cfg, registry.clone(), server.metrics_recorder());
 
         tracing::info!("starting labman proxy server on {}", proxy_addr);
 
