@@ -11,8 +11,8 @@ internet.
 `labmand` provides:
 
 - A single process that runs on one machine in your network  
-- A secure WireGuard tunnel back to the control plane  
-- A unified OpenAI-compatible API exposed over that tunnel  
+- A secure post-quantum WireGuard tunnel (via Rosenpass) back to the control plane  
+- A unified OpenAI-compatible API exposed over that tunnel
 - Automatic discovery of your local LLM servers (Ollama, vLLM, llama.cpp, mistral.rs, etc.)  
 - Basic local scheduling and health checking  
 - Registration + heartbeat to the control-plane  
@@ -34,7 +34,7 @@ Typical distributed AI networks require:
 
 **labman solves all of that with a single daemon**:
 
-- One WireGuard tunnel
+- One post-quantum WireGuard tunnel (Rosenpass)
 - One secure internal API
 - One config file
 - Multiple local endpoints
@@ -49,7 +49,7 @@ labman simply **manages**, **proxies**, and **reports**.
 ## Features
 
 - 🟢 **Open-source and fully auditable**
-- 🔒 **End-to-end encrypted WireGuard tunnel**
+- 🔒 **End-to-end encrypted post-quantum WireGuard tunnel (Rosenpass)**
 - 🧰 **Supports multiple local LLM endpoints**
 - 🔌 **Works with any OpenAI-compatible server**
 - 🎛️ **Local model-aware routing**
@@ -69,8 +69,8 @@ labman simply **manages**, **proxies**, and **reports**.
      ┌────────────────────┐
      │   Control Plane    │
      └───────▲────────────┘
-             │ WireGuard
-             │ tunnel (encrypted)
+             │ Post-Quantum WireGuard
+             │ tunnel (Rosenpass)
      ┌───────┴────────────┐
      │     labmand         │
      │   (this project)    │
@@ -102,7 +102,7 @@ bin/labman-cli/         # operator tools
 crates/
 labman-core/            # shared types and errors
 labman-config/          # config loading
-labman-wireguard/       # WG bootstrap + check
+labman-wireguard/       # Post-quantum WG via Rosenpass (native Rust)
 labman-endpoints/       # local endpoint management
 labman-proxy/           # OpenAI proxy served over WG
 labman-control/         # control-plane client
@@ -126,7 +126,7 @@ sudo systemctl enable --now labmand
 
 4. labman will:
 
-   * bring up WireGuard
+   * bring up post-quantum WireGuard tunnel (Rosenpass)
    * register your node
    * discover your local endpoints
    * start proxying over WG

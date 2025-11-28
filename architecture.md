@@ -53,10 +53,10 @@ Each crate has a single responsibility and a minimal API boundary.
 ## 3.1. Control-plane onboarding
 
 1. Operator installs `labmand`.
-2. Operator obtains node token + WireGuard config from control-plane.
+2. Operator obtains node token + Rosenpass/WireGuard config from control-plane.
 3. labman:
    - validates config
-   - brings up WireGuard interface
+   - brings up post-quantum WireGuard interface (via Rosenpass)
    - registers itself using node token & minimal metadata
 
 The control-plane now knows:
@@ -140,7 +140,7 @@ labman therefore treats the WireGuard connection as a **narrow, single-purpose t
 
 ## 4.2 WireGuard Interface Isolation
 
-labman creates and manages a **dedicated WireGuard interface**, default name:
+labman creates and manages a **dedicated post-quantum WireGuard interface** (via Rosenpass), default name:
 
 ```
 labman0
@@ -256,7 +256,57 @@ Because labman is open-source:
   * The listening socket
   * outbound HTTP to configured local endpoints and the control plane
 
-labman is designed to be a **non-invasive component**: it does its job without weakening or second-guessing an operator’s existing security posture.
+labman is designed to be a **non-invasive component**: it does its job without weakening or second-guessing an operator's existing security posture.
+
+---
+
+## 4.8 Post-Quantum Cryptography with Rosenpass
+
+labman implements **post-quantum secure WireGuard** using Rosenpass, ensuring that the encrypted tunnel between the operator's node and the control plane remains secure even against future quantum computer attacks.
+
+### Why Post-Quantum?
+
+Traditional public-key cryptography (including WireGuard's Curve25519) is vulnerable to attacks from sufficiently powerful quantum computers. While such computers don't exist today, encrypted traffic captured now could be decrypted in the future when quantum computers become available — a "harvest now, decrypt later" attack.
+
+For a distributed inference network handling potentially sensitive workloads, this is unacceptable. Operators need assurance that their traffic is protected not just today, but for years to come.
+
+### What is Rosenpass?
+
+Rosenpass is an open-source, formally verified post-quantum key exchange protocol built on top of WireGuard. It:
+
+- Uses post-quantum-secure cryptographic primitives (Classic McEliece, Kyber)
+- Provides forward secrecy with quantum-resistant guarantees
+- Integrates seamlessly with WireGuard's existing tunnel infrastructure
+- Adds post-quantum protection without sacrificing WireGuard's performance or simplicity
+
+### labman's Implementation Approach
+
+labman integrates Rosenpass **natively in Rust** using the official Rosenpass libraries:
+
+- **No shell wrappers** — direct Rust API integration for reliability and auditability
+- **No external tools** — all cryptographic operations handled in-process
+- **Transparent operation** — operators see a single WireGuard interface (`labman0`)
+- **Automatic key rotation** — Rosenpass handles post-quantum key exchange and periodic rotation
+- **Minimal configuration** — operators provide initial keys; labman handles the rest
+
+The control plane provides the initial Rosenpass configuration (public keys, endpoints) alongside the WireGuard config. labman then:
+
+1. Initializes the Rosenpass key exchange
+2. Creates the WireGuard interface with Rosenpass-derived keys
+3. Maintains the tunnel, automatically rotating keys as needed
+4. Ensures all traffic remains quantum-resistant throughout the session
+
+### Security Properties
+
+This implementation ensures:
+
+- **Quantum resistance**: Tunnel is secure against both classical and quantum attacks
+- **Forward secrecy**: Compromise of long-term keys doesn't compromise past sessions
+- **Auditability**: All cryptographic code is open-source Rust, reviewable by operators
+- **Standards-based**: Uses well-studied post-quantum algorithms (NIST candidates)
+- **Defense in depth**: Even if WireGuard's classical crypto is broken, Rosenpass provides protection
+
+Operators can confidently participate in the network knowing their traffic is protected against both present and future threats.
 
 ---
 
@@ -284,12 +334,18 @@ base_url = "http://192.168.1.42:8000/v1"
 [[endpoint]]
 name = "ollama-box"
 base_url = "http://192.168.1.99:11434/v1"
-
-# Optional policy knobs
 max_concurrent = 8
-model_include = ["mixtral-*", "qwen*"]   # glob/regex allowed (optional)
-model_exclude = ["gpt-4o*", "gpt-3.5-*"] # optional
-````
+
+[[endpoint]]
+name = "filtered-endpoint"
+base_url = "http://192.168.1.100:8000/v1"
+models.include = ["mixtral-*", "qwen*"]   # optional: only proxy these models
+models.exclude = ["gpt-4o*", "gpt-3.5-*"] # optional: exclude these models
+```
+
+**Model Discovery:** labman queries each endpoint's `/v1/models` API to discover what models are available. There is no need to manually configure model lists.
+
+**Model Filtering (Optional):** The `models.include` and `models.exclude` fields allow operators to restrict which models from an endpoint are exposed through the proxy. These are glob patterns applied as filters on top of the endpoint's advertised models. If unspecified, all models from the endpoint are available.
 
 labman handles everything else.
 
@@ -316,14 +372,21 @@ Handles:
 
 ## 6.3. labman-wireguard
 
-Abstracts:
+Implements **post-quantum WireGuard** using Rosenpass natively in Rust.
 
-* create and maintain WireGuard interface(s)
-* maintain interface state (up, down)
-* verifying keys
-* bootstrapping config
-* userspace WireGuard (no root)
-* PQ key bootstrapping (Rosenpass)
+This crate does **not** use shell wrappers or external `wg-quick` commands. Instead, it directly integrates with the Rosenpass Rust libraries to provide quantum-resistant key exchange on top of WireGuard.
+
+Responsibilities:
+
+* Create and maintain post-quantum WireGuard interface(s) using Rosenpass
+* Implement Rosenpass key exchange and rotation
+* Manage interface state (up, down, monitoring)
+* Bootstrap and validate cryptographic keys
+* Handle WireGuard configuration natively via netlink
+* Ensure quantum-resistant security posture
+
+This approach aligns with labman's security ethos: auditable, transparent, and implemented correctly without relying on external tools that could introduce vulnerabilities or operational complexity.
+
 
 ## 6.4. labman-endpoints
 
@@ -334,6 +397,36 @@ Manages:
 * model-to-endpoint mapping
 * load/concurrency estimation
 * selection algorithms
+
+### Model Discovery and Filtering
+
+labman **automatically discovers** available models by querying each endpoint's `/v1/models` API. There is no need for operators to manually configure model lists—this ensures the proxy always reflects reality.
+
+**Discovery Process:**
+1. On startup and periodically, labman queries `GET /v1/models` from each configured endpoint
+2. Each endpoint returns its list of available models (standard OpenAI format)
+3. labman builds an internal registry mapping model names to capable endpoints
+4. When a request arrives for a specific model, labman selects an endpoint that advertises it
+
+**Optional Filtering:**
+
+Operators can optionally restrict which models from an endpoint are exposed:
+
+```toml
+[[endpoint]]
+name = "shared-server"
+base_url = "http://192.168.1.50:8000/v1"
+models.include = ["llama*", "mistral*"]  # only expose models matching these globs
+models.exclude = ["*-uncensored"]        # exclude models matching these globs
+```
+
+- `models.include`: If specified, only models matching these glob patterns are proxied
+- `models.exclude`: If specified, models matching these patterns are filtered out
+- Filters are applied **after** querying `/v1/models`, not instead of it
+- If both are specified, include is applied first, then exclude
+- If neither is specified, all models from the endpoint are available
+
+This design avoids configuration drift—operators never need to manually sync config files with model availability.
 
 ## 6.5. labman-proxy
 
@@ -382,7 +475,6 @@ labman is designed to evolve:
 * new endpoint types (GPU clusters, Kubernetes pods, DPUs)
 * benchmark-based model scoring
 * dynamic cost-aware routing
-* PQ-enabled transport to control-plane
 * richer node metadata (energy use, temperature, VRAM load)
 * custom user-supplied routing plugins
 * integration with homelab dashboard tools
