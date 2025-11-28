@@ -352,12 +352,14 @@ impl EndpointRegistry {
         Ok(())
     }
 
-    /// Spawn a periodic HTTP-based health checker.
+    /// Spawn a periodic HTTP-based health checker and model discovery task.
     ///
     /// This is intended to be called from an async context with a shared
     /// `Arc<tokio::sync::Mutex<EndpointRegistry>>`. It will:
     ///
     /// - Run `health_check_all_http` on the given interval.
+    /// - After each successful health pass, run `discover_models_all_http` so
+    ///   that model information stays reasonably fresh.
     /// - Log any internal errors but keep the task alive.
     ///
     /// The task will run until the provided `shutdown` future resolves.
@@ -384,9 +386,13 @@ impl EndpointRegistry {
                 tokio::select! {
                     _ = ticker.tick() => {
                         let mut guard = registry.lock().await;
-                        let res = guard.health_check_all_http().await;
-                        if let Err(err) = res {
+                        if let Err(err) = guard.health_check_all_http().await {
                             tracing::warn!("periodic endpoint HTTP health check failed: {}", err);
+                            continue;
+                        }
+
+                        if let Err(err) = guard.discover_models_all_http().await {
+                            tracing::warn!("periodic endpoint model discovery failed: {}", err);
                         }
                     }
                     _ = &mut shutdown => {

@@ -112,11 +112,12 @@ The goal is to reach:
 ### 1.3 Integration with Daemon (stub)
 
 - [x] In `labmand`:
-  - [x] Wire up simple main:
+  - [x] Wire up main:
     - [x] Initialise telemetry/logging via `labman-telemetry`.
     - [x] Load config (with `--config`/`-c` argument + default search order).
     - [x] Log a summary (endpoints, WG iface name placeholder, control plane URL).
     - [x] Start HTTP server (`labman-server`) with `/metrics`.
+    - [x] Build `EndpointRegistry` from config and perform initial health + model discovery passes.
 
 **Exit criteria:**
 
@@ -236,45 +237,46 @@ The goal is to reach:
 
 ### 4.1 Endpoint Registry
 
-- [ ] Implement `labman-endpoints` with:
-  - [ ] `EndpointRegistry` struct:
-    - [ ] Stores a collection of `labman-core::Endpoint`.
+- [x] Implement `labman-endpoints` with:
+  - [x] `EndpointRegistry` struct:
+    - [x] Stores a collection of `labman-core::Endpoint`.
     - [ ] Indexes by name and by model name for fast lookup.
-    - [ ] Tracks per-endpoint concurrency limits and active request counts.
-  - [ ] Initialization:
-    - [ ] `fn from_config(config: &LabmanConfig) -> Result<EndpointRegistry>`:
-      - [ ] Convert `EndpointConfig` to `Endpoint` with initial `Unknown` health.
-      - [ ] Store `max_concurrent` and model filters in registry metadata.
+    - [x] Tracks per-endpoint concurrency limits and active request counts.
+  - [x] Initialization:
+    - [x] `fn from_config(config: &LabmanConfig) -> Result<EndpointRegistry>`:
+      - [x] Convert `EndpointConfig` to `Endpoint` with initial health and metadata.
+      - [x] Store `max_concurrent` and model filters in registry metadata.
 
 ### 4.2 Health Checks
 
-- [ ] Implement periodic health checking:
+- [x] Implement periodic health checking:
 
-  - `fn health_check_all(&mut self) -> Result<()>`:
-    - For each endpoint:
-      - Perform a lightweight HTTP request (e.g., `GET /v1/models` or a dedicated health endpoint if configured).
-      - On success: `mark_healthy`, update models using response.
-      - On failure: `mark_unhealthy`, increment failure counter.
-    - Use `LabmanError::Endpoint` / `LabmanError::ModelDiscovery` appropriately.
+  - [x] `fn health_check_all(&mut self) -> Result<()>`:
+    - [x] For each endpoint, mark as healthy (synchronous stub retained for simple callers).
+  - [x] `async fn health_check_all_http(&mut self) -> Result<()>`:
+    - [x] For each endpoint:
+      - [x] Perform an HTTP request to `base_url`.
+      - [x] On 2xx: mark healthy.
+      - [x] On non-2xx or error: mark unhealthy and emit metrics/logs.
 
-  - Add a background task interface:
-    - `fn spawn_health_checker(self: Arc<Mutex<Self>>, interval: Duration, shutdown: ShutdownSignal)`.
-    - Use `tokio` for async runtime.
+  - [x] Add a background task interface:
+    - [x] `fn spawn_periodic_health_check(registry: Arc<tokio::sync::Mutex<EndpointRegistry>>, interval: Duration, shutdown: S)`.
+    - [x] Uses `tokio` for async runtime and runs until shutdown.
 
 ### 4.3 Model Discovery & Filtering
 
-- [ ] Implement model discovery logic consistent with `architecture.md`:
+- [x] Implement model discovery logic consistent with `architecture.md` (first pass):
 
-  - For each endpoint:
-    - Call `GET {base_url}/models` or `/v1/models` (OpenAI format).
-    - Parse into `ModelListResponse` and update `Endpoint.models`.
+  - [x] For each healthy endpoint:
+    - [x] Call `GET {base_url}/models` or `/v1/models` (OpenAI format).
+    - [x] Parse into `ModelListResponse` and update `EndpointEntry.discovered_models`.
 
-  - Apply filtering rules from config:
-    - `models.include` (glob-based allowlist).
-    - `models.exclude` (glob-based denylist).
-    - If both present: include first, then exclude.
-  - Maintain:
-    - Map `model_name -> Vec<EndpointName>` for scheduling.
+  - [x] Apply filtering rules from config:
+    - [x] `models.include` (glob-based allowlist).
+    - [x] `models.exclude` (glob-based denylist).
+    - [x] If both present: include first, then exclude.
+  - [ ] Maintain:
+    - [ ] Map `model_name -> Vec<EndpointName>` for scheduling.
 
 ### 4.4 Scheduling / Selection Algorithm
 
@@ -303,13 +305,13 @@ The goal is to reach:
 
 ### 4.6 Daemon Integration
 
-- [ ] In `labmand`:
-  - [ ] After config + WG:
-    - [ ] Instantiate `EndpointRegistry` from config.
-    - [ ] Kick off:
-      - [ ] Initial health check & model discovery.
-      - [ ] Periodic health checker.
-    - [ ] Keep daemon alive running an idle loop (until later proxy/client integration).
+- [x] In `labmand`:
+  - [x] After config (WG pending):
+    - [x] Instantiate `EndpointRegistry` from config via `EndpointRegistryBuilder` with shared metrics.
+    - [x] Kick off:
+      - [x] Initial HTTP-based health check & model discovery.
+      - [x] Periodic health checker + model discovery loop in the main Tokio runtime.
+    - [x] Keep daemon alive by running the HTTP server and background tasks in the same runtime.
 
 **Exit criteria:**
 

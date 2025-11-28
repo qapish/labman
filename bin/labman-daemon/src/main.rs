@@ -258,11 +258,20 @@ fn run_server_blocking(
 
         // Perform an initial HTTP-based health check pass so that downstream
         // components (proxy, control-plane reporting) can rely on basic health
-        // status.
+        // status, followed by an initial model discovery pass so that routing
+        // decisions and capability reporting have model information.
         {
             let mut guard = registry.lock().await;
             if let Err(err) = guard.health_check_all_http().await {
                 tracing::error!("initial endpoint HTTP health check failed: {}", err);
+                return Err::<(), Box<dyn std::error::Error>>(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    err.to_string(),
+                )));
+            }
+
+            if let Err(err) = guard.discover_models_all_http().await {
+                tracing::error!("initial endpoint model discovery failed: {}", err);
                 return Err::<(), Box<dyn std::error::Error>>(Box::new(std::io::Error::new(
                     std::io::ErrorKind::Other,
                     err.to_string(),
