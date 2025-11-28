@@ -884,6 +884,7 @@ dependencies = [
  "labman-config",
  "labman-core",
  "labman-endpoints",
+ "labman-proxy",
  "labman-server",
  "labman-telemetry",
  "tokio",

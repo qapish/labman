@@ -8,6 +8,7 @@ use clap::{ArgAction, Parser};
 use labman_config::{load_default, load_from_path, LabmanConfig};
 use labman_core::LabmanError;
 use labman_endpoints::{EndpointRegistry, EndpointRegistryBuilder};
+use labman_proxy::{ProxyConfig as LabmanProxyConfig, ProxyServer as LabmanProxyServer};
 use labman_server::{LabmanServer, ServerConfig};
 use labman_telemetry;
 use tracing::warn;
@@ -204,10 +205,10 @@ fn resolve_bind_addr(cli: &Cli, cfg: &LabmanConfig) -> Result<SocketAddr, String
     Ok(SocketAddr::from(([0, 0, 0, 0], port)))
 }
 
-/// Run the labman HTTP server using a Tokio runtime.
+/// Run the labman HTTP server and proxy using a Tokio runtime.
 ///
-/// This helper exists so `main` can remain synchronous while the server
-/// runs asynchronously under the hood.
+/// This helper exists so `main` can remain synchronous while the servers
+/// run asynchronously under the hood.
 fn run_server_blocking(
     bind_addr: SocketAddr,
     config: LabmanConfig,
@@ -290,12 +291,74 @@ fn run_server_blocking(
             },
         );
 
-        // Run the HTTP server to completion.
-        if let Err(e) = server.run().await {
-            return Err::<(), Box<dyn std::error::Error>>(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            )));
+        // Derive proxy listen address from configuration. For now we bind on
+        // 127.0.0.1 and use the configured proxy.listen_port so that the proxy
+        // is reachable locally even before WireGuard integration is complete.
+        let proxy_port = config.proxy.listen_port;
+        let proxy_addr = SocketAddr::from(([127, 0, 0, 1], proxy_port));
+
+        let proxy_cfg = LabmanProxyConfig {
+            listen_addr: proxy_addr,
+        };
+
+        // Build a proxy server with a fresh EndpointRegistry using the same
+        // configuration and shared metrics recorder. This keeps the proxy
+        // decoupled from the metrics server while still sharing telemetry.
+        let proxy_registry = match EndpointRegistryBuilder::new(config.clone())
+            .with_metrics(server.metrics_recorder())
+            .build()
+        {
+            Ok(registry) => registry,
+            Err(err) => {
+                tracing::error!(
+                    "failed to build proxy endpoint registry from config: {}",
+                    err
+                );
+                return Err::<(), Box<dyn std::error::Error>>(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    err.to_string(),
+                )));
+            }
+        };
+
+        let proxy_server =
+            LabmanProxyServer::new(proxy_cfg, proxy_registry, server.metrics_recorder());
+
+        tracing::info!("starting labman proxy server on {}", proxy_addr);
+
+        // Run metrics server and proxy server concurrently. Shutdown is
+        // currently driven by whichever server terminates first.
+        let server_handle = tokio::spawn(server.run());
+        let proxy_handle = proxy_server.spawn();
+
+        tokio::select! {
+            res = server_handle => {
+                if let Err(join_err) = res {
+                    return Err::<(), Box<dyn std::error::Error>>(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("labman-server join error: {}", join_err),
+                    )));
+                }
+            }
+            res = proxy_handle => {
+                match res {
+                    Ok(Ok(())) => {
+                        tracing::info!("labman-proxy server exited cleanly");
+                    }
+                    Ok(Err(e)) => {
+                        return Err::<(), Box<dyn std::error::Error>>(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("labman-proxy error: {}", e),
+                        )));
+                    }
+                    Err(join_err) => {
+                        return Err::<(), Box<dyn std::error::Error>>(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("labman-proxy join error: {}", join_err),
+                        )));
+                    }
+                }
+            }
         }
 
         Ok(())

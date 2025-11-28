@@ -270,12 +270,29 @@ impl EndpointRegistry {
             let resp = client.get(url).send().await;
 
             match resp {
+                // Treat 2xx responses as healthy.
                 Ok(r) if r.status().is_success() => {
                     entry.healthy = true;
 
                     if let Some(metrics) = &self.metrics {
                         metrics.record_request_end(Some(name.as_str()), None, true, None);
                     }
+                }
+                // Also treat 404 at the base_url as "reachable" for now so that
+                // model discovery can still run. Many OpenAI-compatible servers
+                // return 404 for bare `/v1` even though `/v1/models` works.
+                Ok(r) if r.status().as_u16() == 404 => {
+                    entry.healthy = true;
+
+                    if let Some(metrics) = &self.metrics {
+                        metrics.record_request_end(Some(name.as_str()), None, true, None);
+                    }
+
+                    tracing::debug!(
+                        "endpoint '{}' reachable but returned 404 at base_url; \
+                         treating as healthy for model discovery",
+                        entry.endpoint.name
+                    );
                 }
                 Ok(r) => {
                     entry.healthy = false;
