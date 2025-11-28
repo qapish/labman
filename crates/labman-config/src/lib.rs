@@ -42,6 +42,124 @@ pub struct LabmanConfig {
     pub endpoints: Vec<EndpointConfig>,
 }
 
+impl LabmanConfig {
+    /// Perform basic structural validation of the configuration.
+    ///
+    /// This does not attempt to contact any external systems; it only checks
+    /// for obviously invalid or inconsistent values. More advanced validation
+    /// (e.g., control-plane reachability) belongs in higher-level crates.
+    pub fn validate(&self) -> Result<()> {
+        self.validate_control_plane()?;
+        self.validate_endpoints()?;
+        self.validate_wireguard()?;
+        Ok(())
+    }
+
+    fn validate_control_plane(&self) -> Result<()> {
+        if self.control_plane.base_url.trim().is_empty() {
+            return Err(LabmanError::invalid_config(
+                "control_plane.base_url",
+                "control_plane.base_url must not be empty",
+            ));
+        }
+
+        if self.control_plane.node_token.trim().is_empty() {
+            return Err(LabmanError::invalid_config(
+                "control_plane.node_token",
+                "control_plane.node_token must not be empty",
+            ));
+        }
+
+        // Very lightweight check: URL should look like http(s)://...
+        let url = self.control_plane.base_url.trim();
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return Err(LabmanError::invalid_config(
+                "control_plane.base_url",
+                "control_plane.base_url must start with http:// or https://",
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn validate_endpoints(&self) -> Result<()> {
+        // Check for duplicate endpoint names
+        let mut seen = std::collections::HashSet::new();
+        for ep in &self.endpoints {
+            if ep.name.trim().is_empty() {
+                return Err(LabmanError::invalid_config(
+                    "endpoints.name",
+                    "endpoint name must not be empty",
+                ));
+            }
+
+            if !seen.insert(ep.name.clone()) {
+                return Err(LabmanError::invalid_config(
+                    "endpoints.name",
+                    &format!("duplicate endpoint name: {}", ep.name),
+                ));
+            }
+
+            let base_url = ep.base_url.trim();
+            if base_url.is_empty() {
+                return Err(LabmanError::invalid_config(
+                    "endpoints.base_url",
+                    &format!("endpoint '{}' has an empty base_url", ep.name),
+                ));
+            }
+
+            if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
+                return Err(LabmanError::invalid_config(
+                    "endpoints.base_url",
+                    &format!(
+                        "endpoint '{}' base_url must start with http:// or https://",
+                        ep.name
+                    ),
+                ));
+            }
+
+            // Allow base URLs that either end with `/v1` or can be normalized to it.
+            if !(base_url.ends_with("/v1") || base_url.contains("/v1/")) {
+                // We do not modify here, just warn via error message context.
+                // Normalisation logic, if any, should live in a higher layer.
+                return Err(LabmanError::invalid_config(
+                    "endpoints.base_url",
+                    &format!(
+                        "endpoint '{}' base_url should typically end with /v1 (got '{}')",
+                        ep.name, base_url
+                    ),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_wireguard(&self) -> Result<()> {
+        // For now we only perform very basic checks; stronger invariants
+        // (e.g., CIDR parsing, interface existence) are left to the
+        // wireguard layer.
+        if self.wireguard.interface_name.trim().is_empty() {
+            return Err(LabmanError::invalid_config(
+                "wireguard.interface_name",
+                "wireguard.interface_name must not be empty",
+            ));
+        }
+
+        // Sanity check allowed_ips for obviously bogus entries.
+        for cidr in &self.wireguard.allowed_ips {
+            if cidr.trim().is_empty() {
+                return Err(LabmanError::invalid_config(
+                    "wireguard.allowed_ips",
+                    "wireguard.allowed_ips must not contain empty entries",
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
 /// Control‑plane configuration section.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ControlPlaneConfig {
@@ -236,7 +354,7 @@ mod tests {
         // Create a temporary file path in the current directory without relying on
         // external tempfile utilities. This keeps the test self-contained and
         // avoids additional dev-only dependencies.
-        let mut path = PathBuf::from("test_labman_config_minimal.toml");
+        let path = PathBuf::from("test_labman_config_minimal.toml");
 
         // Ensure we don't accidentally reuse an existing file from a previous run.
         let _ = fs::remove_file(&path);
@@ -284,6 +402,79 @@ base_url = "http://127.0.0.1:11434/v1"
     #[test]
     fn test_missing_file_errors() {
         let res = load_from_path("/this/definitely/does/not/exist.toml");
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_control_plane_url() {
+        let cfg = LabmanConfig {
+            control_plane: ControlPlaneConfig {
+                base_url: "".to_string(),
+                node_token: "token".to_string(),
+                region: None,
+                description: None,
+            },
+            wireguard: WireGuardConfig {
+                interface_name: "labman0".to_string(),
+                address: None,
+                private_key_path: None,
+                public_key_path: None,
+                peer_endpoint: None,
+                allowed_ips: Vec::new(),
+                rosenpass: None,
+            },
+            proxy: ProxyConfig {
+                listen_port: 8080,
+                listen_addr: None,
+            },
+            endpoints: Vec::new(),
+        };
+
+        let res = cfg.validate();
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_duplicate_endpoint_names() {
+        let cfg = LabmanConfig {
+            control_plane: ControlPlaneConfig {
+                base_url: "https://control.example.com/api/v1".to_string(),
+                node_token: "token".to_string(),
+                region: None,
+                description: None,
+            },
+            wireguard: WireGuardConfig {
+                interface_name: "labman0".to_string(),
+                address: None,
+                private_key_path: None,
+                public_key_path: None,
+                peer_endpoint: None,
+                allowed_ips: Vec::new(),
+                rosenpass: None,
+            },
+            proxy: ProxyConfig {
+                listen_port: 8080,
+                listen_addr: None,
+            },
+            endpoints: vec![
+                EndpointConfig {
+                    name: "dup".to_string(),
+                    base_url: "http://127.0.0.1:11434/v1".to_string(),
+                    max_concurrent: None,
+                    models_include: None,
+                    models_exclude: None,
+                },
+                EndpointConfig {
+                    name: "dup".to_string(),
+                    base_url: "http://127.0.0.1:11434/v1".to_string(),
+                    max_concurrent: None,
+                    models_include: None,
+                    models_exclude: None,
+                },
+            ],
+        };
+
+        let res = cfg.validate();
         assert!(res.is_err());
     }
 }

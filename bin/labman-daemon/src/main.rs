@@ -41,6 +41,13 @@ struct Cli {
     /// This is primarily useful for debugging configuration issues.
     #[arg(long = "print-config", action = ArgAction::SetTrue)]
     print_config: bool,
+
+    /// Validate configuration and exit without starting the daemon.
+    ///
+    /// This is useful for CI and deployment pipelines to ensure configuration
+    /// is structurally sound before rollout.
+    #[arg(long = "check-config", action = ArgAction::SetTrue)]
+    check_config: bool,
 }
 
 fn main() {
@@ -81,6 +88,18 @@ fn main() {
             process::exit(1);
         }
     };
+
+    // Perform structural validation before any further processing.
+    if let Err(err) = config.validate() {
+        eprintln!("labmand: configuration validation failed: {}", err);
+        process::exit(1);
+    }
+
+    if cli.check_config {
+        // Configuration loaded and validated successfully; exit cleanly.
+        eprintln!("labmand: configuration is valid");
+        return;
+    }
 
     if cli.print_config {
         print_config_summary(&config);
