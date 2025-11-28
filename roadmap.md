@@ -21,42 +21,42 @@ The goal is to reach:
 
 **Existing pieces:**
 
-- Workspace set up with crates:
-  - `labman-core` – shared types (endpoint, node, error)
+- [x] Workspace set up with crates:
+  - [x] `labman-core` – shared types (endpoint, node, error)
   - Placeholders for:
-    - `labman-config`
-    - `labman-wireguard`
-    - `labman-endpoints`
-    - `labman-proxy`
-    - `labman-client`
-    - `labman-telemetry`
-    - `labmand` (`bin/labman-daemon`)
-    - `labman` (`bin/labman-cli`)
-- `labman-core` has:
-  - `LabmanError` and `Result<T>`
-  - Endpoint types: `Endpoint`, `EndpointHealth`, `ModelDescriptor`, `ModelListResponse`
-  - Node types: `NodeInfo`, `NodeCapabilities`, `NodeStatus`, `NodeState`, registration/heartbeat messages
+    - [x] `labman-config`
+    - [ ] `labman-wireguard`
+    - [ ] `labman-endpoints`
+    - [ ] `labman-proxy`
+    - [ ] `labman-client`
+    - [x] `labman-telemetry`
+    - [x] `labmand` (`bin/labman-daemon`)
+    - [ ] `labman` (`bin/labman-cli`)
+- [x] `labman-core` has:
+  - [x] `LabmanError` and `Result<T>`
+  - [x] Endpoint types: `Endpoint`, `EndpointHealth`, `ModelDescriptor`, `ModelListResponse`
+  - [x] Node types: `NodeInfo`, `NodeCapabilities`, `NodeStatus`, `NodeState`, registration/heartbeat messages
 
 **Goals for this stage:**
 
-1. Ensure the workspace builds successfully with `labman-core` as-is:
-   - `cargo check -p labman-core`
-   - `cargo test -p labman-core`
+- [ ] Ensure the workspace builds successfully with `labman-core` as-is:
+  - `cargo check -p labman-core`
+  - `cargo test -p labman-core`
 
-2. Define minimal cross-crate dependency graph (no implementation yet):
-   - `labman-config` depends on `labman-core`
-   - `labman-wireguard` depends on `labman-core`
-   - `labman-endpoints` depends on `labman-core`
-   - `labman-proxy` depends on `labman-core`, `labman-endpoints`
-   - `labman-client` depends on `labman-core`
-   - `labman-telemetry` depends on `tracing`, `tracing-subscriber`
-   - `labmand` depends on all above crates
-   - `labman` (CLI) depends on `labman-core`, `labman-config`, `labman-client` (eventually)
+- [ ] Define minimal cross-crate dependency graph (no implementation yet):
+  - [x] `labman-config` depends on `labman-core`
+  - [ ] `labman-wireguard` depends on `labman-core`
+  - [ ] `labman-endpoints` depends on `labman-core`
+  - [ ] `labman-proxy` depends on `labman-core`, `labman-endpoints`
+  - [ ] `labman-client` depends on `labman-core`
+  - [x] `labman-telemetry` depends on `tracing`, `tracing-subscriber`
+  - [x] `labmand` depends on all above crates
+  - [ ] `labman` (CLI) depends on `labman-core`, `labman-config`, `labman-client` (eventually)
 
 **Exit criteria:**
 
-- Workspace compiles with stubbed crates (even if most functions are `todo!()`) and tests in `labman-core` pass.
-- Crate APIs are sketched enough to be called from the daemon in later stages.
+- [ ] Workspace compiles with stubbed crates (even if most functions are `todo!()`) and tests in `labman-core` pass.
+- [x] Crate APIs are sketched enough to be called from the daemon in later stages.
 
 ---
 
@@ -66,62 +66,67 @@ The goal is to reach:
 
 ### 1.1 Types & File Loading
 
-- Implement `labman-config` with:
-  - `LabmanConfig` root struct:
-    - `control_plane`:
-      - `base_url`
-      - `node_token`
-      - optional `region`, `description`
-    - `wireguard`:
-      - `interface_name` (default: `labman0`)
-      - `address` (optional; or derived from control plane registration)
-      - `private_key_path`, `public_key_path`
-      - `peer_endpoint` (control-plane WG endpoint)
-      - `allowed_ips`
-      - Rosenpass-related fields (key paths, peer pk, etc.)
-    - `proxy`:
-      - `listen_port` (default `8080`)
-      - optional `listen_addr` override (but constrained to WG address later)
-    - `endpoints`: `Vec<EndpointConfig>`
-  - `EndpointConfig`:
-    - `name: String`
-    - `base_url: String`
-    - `max_concurrent: Option<usize>`
-    - `models_include: Option<Vec<String>>`
-    - `models_exclude: Option<Vec<String>>`
+- [x] Implement `labman-config` with:
+  - [x] `LabmanConfig` root struct:
+    - [x] `control_plane`:
+      - [x] `base_url`
+      - [x] `node_token`
+      - [x] optional `region`, `description`
+    - [x] `wireguard`:
+      - [x] `interface_name` (default: `labman0`)
+      - [x] `address` (optional; or derived from control plane registration)
+      - [x] `private_key_path`, `public_key_path`
+      - [x] `peer_endpoint` (control-plane WG endpoint)
+      - [x] `allowed_ips`
+      - [x] Rosenpass-related fields (key paths, peer pk, etc.)
+    - [x] `proxy`:
+      - [x] `listen_port` (default `8080`)
+      - [x] optional `listen_addr` override (but constrained to WG address later)
+    - [x] `endpoints`: `Vec<EndpointConfig>`
+  - [x] `EndpointConfig`:
+    - [x] `name: String`
+    - [x] `base_url: String`
+    - [x] `max_concurrent: Option<usize>`
+    - [x] `models_include: Option<Vec<String>>`
+    - [x] `models_exclude: Option<Vec<String>>`
 
-- Implement:
-  - `fn load_from_path<P: AsRef<Path>>(path: P) -> Result<LabmanConfig>` using `toml` and `serde`.
-  - `fn load_default() -> Result<LabmanConfig>`:
-    - Looks at common locations (`/etc/labman/labman.toml`, `./labman.toml`, environment variable override).
+- [x] Implement:
+  - [x] `fn load_from_path<P: AsRef<Path>>(path: P) -> Result<LabmanConfig>` using `toml` and `serde`.
+  - [x] `fn load_default() -> Result<LabmanConfig>`:
+    - [x] Looks at common locations (`/etc/labman/labman.toml`, `./labman.toml`).
+    - [x] Does not rely on labman-specific environment variables.
 
 ### 1.2 Validation & Normalisation
 
-- Add methods on `LabmanConfig`:
-  - `fn validate(&self) -> Result<()>` that checks:
-    - Required fields present (node token, control_plane base URL).
-    - Endpoint URLs are valid HTTP/HTTPS and end in `/v1` or can be normalised.
-    - No duplicate endpoint names.
-    - WireGuard keys paths exist (or are clearly marked as required outputs of onboarding).
-    - `allowed_ips` does not include LAN ranges unless explicitly allowed (warn-level only, but never adds routes itself).
-  - `fn to_node_info(&self, capabilities: NodeCapabilities) -> NodeInfo`:
-    - Fill node description/region from config.
-  - Helper for building `labman-core::Endpoint` from `EndpointConfig`.
+- [x] Add methods on `LabmanConfig`:
+  - [x] `fn validate(&self) -> Result<()>` that checks:
+    - [x] Required fields present (node token, control_plane base URL).
+    - [x] Endpoint URLs are valid HTTP/HTTPS and end in `/v1` or can be normalised.
+    - [x] No duplicate endpoint names.
+    - [ ] WireGuard keys paths exist (or are clearly marked as required outputs of onboarding).
+    - [ ] `allowed_ips` does not include LAN ranges unless explicitly allowed (warn-level only, but never adds routes itself).
+  - [x] `fn to_node_info(&self, capabilities: NodeCapabilities) -> NodeInfo`:
+    - [x] Fill node description/region from config.
+  - [ ] Helper for building `labman-core::Endpoint` from `EndpointConfig`.
 
 ### 1.3 Integration with Daemon (stub)
 
-- In `labmand`:
-  - Wire up simple main:
-    - Initialise logging (placeholder).
-    - Load config (with path argument + default search order).
-    - Log a summary (endpoints, WG iface name, control plane URL).
+- [x] In `labmand`:
+  - [x] Wire up simple main:
+    - [x] Initialise telemetry/logging via `labman-telemetry`.
+    - [x] Load config (with `--config`/`-c` argument + default search order).
+    - [x] Log a summary (endpoints, WG iface name placeholder, control plane URL).
+    - [x] Start HTTP server (`labman-server`) with `/metrics`.
 
 **Exit criteria:**
 
-- `labman-config` has tests:
-  - Loads `labman.example.toml` (or similar).
-  - Fails on malformed configs with `LabmanError::Config` / `LabmanError::InvalidConfig`.
-- `labmand` binary can be run with `--config` and prints parsed configuration, then exits.
+- [x] `labman-config` has tests:
+  - [x] Loads an example TOML config.
+  - [x] Fails on malformed configs with `LabmanError::Config` / `LabmanError::InvalidConfig`.
+- [x] `labmand` binary can be run with `--config` and:
+  - [x] Prints parsed configuration summary.
+  - [x] Validates configuration.
+  - [x] Starts the HTTP server (including `/metrics`) using `labman-server`.
 
 ---
 
@@ -131,27 +136,29 @@ The goal is to reach:
 
 ### 2.1 Telemetry Crate
 
-- Implement `labman-telemetry` with:
-  - `fn init(level: Option<&str>) -> Result<()>`:
-    - Sets up `tracing_subscriber` with `env_filter`.
-    - Formats logs with timestamps, log level, and crate/module.
-  - Optional features for JSON logging (for container environments).
+- [x] Implement `labman-telemetry` with:
+  - [x] `fn init(level: Option<&str>) -> Result<()>`:
+    - [x] Sets up `tracing_subscriber` with `env_filter`.
+    - [x] Formats logs with timestamps, log level, and crate/module.
+  - [ ] Optional features for JSON logging (for container environments).
 
 ### 2.2 Metrics Hooks (Future-proofing)
 
-- Define an internal interface for future metrics export (e.g., Prometheus) but keep it simple for now:
-  - Skeleton functions or traits (e.g., `record_request`, `record_error`, etc.), no real metrics backend yet.
+- [x] Define an internal interface for metrics export (Prometheus-backed):
+  - [x] Traits for counters/gauges/histograms and a `MetricsRecorder` trait.
+  - [x] Concrete `PrometheusMetricsRecorder` with shared `Registry`.
+  - [x] HTTP helper `prometheus_http_response` for `/metrics`.
 
 ### 2.3 Integration
 
-- Use `labman-telemetry::init` at the start of `labmand::main`.
-- Ensure `labman-core` uses `tracing` for notable events (model discovery issues, endpoint health changes) where appropriate, but keep `labman-core` mostly logging-free to remain generic.
+- [x] Use `labman-telemetry::init` at the start of `labmand::main`.
+- [ ] Ensure `labman-core` uses `tracing` for notable events (model discovery issues, endpoint health changes) where appropriate, but keep `labman-core` mostly logging-free to remain generic.
 
 **Exit criteria:**
 
-- `labmand` starts with telemetry initialised.
-- Logs show meaningful messages when configuration load succeeds/fails.
-- Unit tests for telemetry are minimal (ensure `init` doesn’t panic).
+- [x] `labmand` starts with telemetry initialised.
+- [x] Logs show meaningful messages when configuration load succeeds/fails.
+- [x] Unit tests for telemetry are minimal (ensure `init` doesn’t panic).
 
 ---
 
@@ -161,7 +168,7 @@ The goal is to reach:
 
 ### 3.1 WireGuard Interface Abstraction
 
-- Implement `labman-wireguard` with a minimal, testable abstraction:
+- [ ] Implement `labman-wireguard` with a minimal, testable abstraction:
 
   - Core types:
     - `WireGuardConfig` (created from `LabmanConfig` + control-plane registration response).
@@ -183,7 +190,7 @@ The goal is to reach:
 
 ### 3.2 Rosenpass Integration
 
-- Introduce a trait or façade for Rosenpass integration:
+- [ ] Introduce a trait or façade for Rosenpass integration:
 
   - `trait RosenpassEngine`:
     - `fn init(&self, cfg: &RosenpassConfig) -> Result<RosenpassSession>`
@@ -193,7 +200,7 @@ The goal is to reach:
 
 ### 3.3 Security Invariants
 
-- Implement safeguards in `labman-wireguard` and/or `labmand`:
+- [ ] Implement safeguards in `labman-wireguard` and/or `labmand`:
 
   - Ensure:
     - Interface is created as `/32` address (no routing for LANs).
@@ -208,18 +215,18 @@ The goal is to reach:
 
 ### 3.4 Daemon Integration
 
-- In `labmand`:
-  - After config load, call into `labman-wireguard` to initialise the interface (with temporary keys from config).
-  - Log resulting WG IP address.
-  - Exit afterwards (until later stages add proxy and control-plane).
+- [ ] In `labmand`:
+  - [ ] After config load, call into `labman-wireguard` to initialise the interface (with temporary keys from config).
+  - [ ] Log resulting WG IP address.
+  - [ ] Integrate WG lifecycle with daemon startup/shutdown.
 
 **Exit criteria:**
 
-- `labmand` can:
-  - Load config.
-  - Bring up a WG interface (even if using a simple backend).
-  - Tear it down cleanly on shutdown or error paths.
-- Integration tests (VM/CI environment permitting) for WG creation and reachability from localhost.
+- [ ] `labmand` can:
+  - [x] Load config.
+  - [ ] Bring up a WG interface (even if using a simple backend).
+  - [ ] Tear it down cleanly on shutdown or error paths.
+- [ ] Integration tests (VM/CI environment permitting) for WG creation and reachability from localhost.
 
 ---
 
@@ -229,19 +236,19 @@ The goal is to reach:
 
 ### 4.1 Endpoint Registry
 
-- Implement `labman-endpoints` with:
-  - `EndpointRegistry` struct:
-    - Stores a collection of `labman-core::Endpoint`.
-    - Indexes by name and by model name for fast lookup.
-    - Tracks per-endpoint concurrency limits and active request counts.
-  - Initialization:
-    - `fn from_config(config: &LabmanConfig) -> Result<EndpointRegistry>`:
-      - Convert `EndpointConfig` to `Endpoint` with initial `Unknown` health.
-      - Store `max_concurrent` and model filters in registry metadata.
+- [ ] Implement `labman-endpoints` with:
+  - [ ] `EndpointRegistry` struct:
+    - [ ] Stores a collection of `labman-core::Endpoint`.
+    - [ ] Indexes by name and by model name for fast lookup.
+    - [ ] Tracks per-endpoint concurrency limits and active request counts.
+  - [ ] Initialization:
+    - [ ] `fn from_config(config: &LabmanConfig) -> Result<EndpointRegistry>`:
+      - [ ] Convert `EndpointConfig` to `Endpoint` with initial `Unknown` health.
+      - [ ] Store `max_concurrent` and model filters in registry metadata.
 
 ### 4.2 Health Checks
 
-- Implement periodic health checking:
+- [ ] Implement periodic health checking:
 
   - `fn health_check_all(&mut self) -> Result<()>`:
     - For each endpoint:
@@ -256,7 +263,7 @@ The goal is to reach:
 
 ### 4.3 Model Discovery & Filtering
 
-- Implement model discovery logic consistent with `architecture.md`:
+- [ ] Implement model discovery logic consistent with `architecture.md`:
 
   - For each endpoint:
     - Call `GET {base_url}/models` or `/v1/models` (OpenAI format).
@@ -271,7 +278,7 @@ The goal is to reach:
 
 ### 4.4 Scheduling / Selection Algorithm
 
-- Implement model-aware routing:
+- [ ] Implement model-aware routing:
 
   - `fn select_endpoint_for_model(&self, model: &str) -> Result<&Endpoint>`:
     - Filter endpoints:
@@ -287,7 +294,7 @@ The goal is to reach:
 
 ### 4.5 Control-Plane Capabilities View
 
-- Provide a function to convert the registry into `NodeCapabilities`:
+- [ ] Provide a function to convert the registry into `NodeCapabilities`:
 
   - `fn to_node_capabilities(&self) -> NodeCapabilities`:
     - Flatten all unique models.
@@ -296,21 +303,21 @@ The goal is to reach:
 
 ### 4.6 Daemon Integration
 
-- In `labmand`:
-  - After config + WG:
-    - Instantiate `EndpointRegistry` from config.
-    - Kick off:
-      - Initial health check & model discovery.
-      - Periodic health checker.
-    - Keep daemon alive running an idle loop (until later proxy/client integration).
+- [ ] In `labmand`:
+  - [ ] After config + WG:
+    - [ ] Instantiate `EndpointRegistry` from config.
+    - [ ] Kick off:
+      - [ ] Initial health check & model discovery.
+      - [ ] Periodic health checker.
+    - [ ] Keep daemon alive running an idle loop (until later proxy/client integration).
 
 **Exit criteria:**
 
-- Unit tests for:
-  - Model discovery and filtering.
-  - Endpoint selection logic.
-  - Health status transitions.
-- Simple integration test using a mocked local HTTP server.
+- [ ] Unit tests for:
+  - [ ] Model discovery and filtering.
+  - [ ] Endpoint selection logic.
+  - [ ] Health status transitions.
+- [ ] Simple integration test using a mocked local HTTP server.
 
 ---
 
@@ -320,7 +327,7 @@ The goal is to reach:
 
 ### 5.1 HTTP Server Skeleton
 
-- Implement `labman-proxy` using `axum` or `hyper`:
+- [ ] Implement `labman-proxy` using `axum` or `hyper`:
 
   - `fn start_proxy(registry: Arc<EndpointRegistry>, listen_addr: SocketAddr, shutdown: ShutdownSignal) -> Result<()>`.
   - Expose routes:
@@ -328,16 +335,16 @@ The goal is to reach:
     - `POST /v1/completions`
     - `GET /v1/models`
 
-- Ensure:
-  - Binding is restricted to WG IP/port (address from `WireGuardInterface`).
-  - No binding to `0.0.0.0` or LAN interfaces.
+- [ ] Ensure:
+  - [ ] Binding is restricted to WG IP/port (address from `WireGuardInterface`).
+  - [ ] No binding to `0.0.0.0` or LAN interfaces.
 
 ### 5.2 Request Handling
 
-- For `/v1/models`:
-  - Return aggregated model list from `EndpointRegistry::to_node_capabilities().models` in OpenAI `list` format.
+- [ ] For `/v1/models`:
+  - [ ] Return aggregated model list from `EndpointRegistry::to_node_capabilities().models` in OpenAI `list` format.
 
-- For `/v1/chat/completions` and `/v1/completions`:
+- [ ] For `/v1/chat/completions` and `/v1/completions`:
   - Parse incoming OpenAI-compatible request body:
     - Extract `model` field.
     - Handle both streaming (`stream: true`) and non-streaming.
@@ -355,7 +362,7 @@ The goal is to reach:
 
 ### 5.3 Streaming Support
 
-- Implement streaming (SSE-style or chunked JSON lines as per OpenAI):
+- [ ] Implement streaming (SSE-style or chunked JSON lines as per OpenAI):
 
   - Proxy streaming responses from local endpoints to upstream client.
   - Carefully handle backpressure and cancellation:
@@ -364,25 +371,25 @@ The goal is to reach:
 
 ### 5.4 Telemetry
 
-- Use `tracing` to log:
-  - Request start and end (per request ID).
-  - Endpoint selection decision.
-  - Errors and timeouts.
+- [ ] Use `tracing` to log:
+  - [ ] Request start and end (per request ID).
+  - [ ] Endpoint selection decision.
+  - [ ] Errors and timeouts.
 
 ### 5.5 Daemon Integration
 
-- In `labmand`:
-  - After WG + endpoints:
-    - Obtain WG IP from `WireGuardInterface`.
-    - Derive `listen_addr = (wg_ip, config.proxy.listen_port)`.
-    - Start proxy server with graceful shutdown support.
+- [ ] In `labmand`:
+  - [ ] After WG + endpoints:
+    - [ ] Obtain WG IP from `WireGuardInterface`.
+    - [ ] Derive `listen_addr = (wg_ip, config.proxy.listen_port)`.
+    - [ ] Start proxy server with graceful shutdown support.
 
 **Exit criteria:**
 
-- `labmand` can:
-  - Bring up WG.
-  - Register endpoints.
-  - Serve `/v1/models` and `chat/completions` over the WG address.
+- [ ] `labmand` can:
+  - [ ] Bring up WG.
+  - [ ] Register endpoints.
+  - [ ] Serve `/v1/models` and `chat/completions` over the WG address.
 - Manual test:
   - Simulate control-plane with `curl`/HTTP client to WG IP.
   - Observe requests routed to a local test endpoint.
@@ -395,7 +402,7 @@ The goal is to reach:
 
 ### 6.1 Registration
 
-- Implement `labman-client` with:
+- [ ] Implement `labman-client` with:
 
   - `ControlPlaneClient` struct:
     - Contains `base_url`, `node_token`, HTTP client.
@@ -412,7 +419,7 @@ The goal is to reach:
 
 ### 6.2 Heartbeat
 
-- Implement heartbeat loop:
+- [ ] Implement heartbeat loop:
 
   - `async fn send_heartbeat(&self, heartbeat: HeartbeatRequest) -> Result<HeartbeatResponse>`.
 
@@ -431,7 +438,7 @@ The goal is to reach:
 
 ### 6.3 Error Handling & Retries
 
-- For control-plane errors:
+- [ ] For control-plane errors:
   - Use retry/backoff for transient errors (`LabmanError::is_transient`).
   - On authentication failures or fatal errors:
     - Log and set node state to `Error`.
@@ -439,11 +446,11 @@ The goal is to reach:
 
 **Exit criteria:**
 
-- `labmand`:
-  - Registers node at startup with control-plane.
-  - Receives WG address, configures interface.
-  - Starts periodic heartbeats with up-to-date status.
-- Tests with a mock control-plane HTTP server.
+- [ ] `labmand`:
+  - [ ] Registers node at startup with control-plane.
+  - [ ] Receives WG address, configures interface.
+  - [ ] Starts periodic heartbeats with up-to-date status.
+- [ ] Tests with a mock control-plane HTTP server.
 
 ---
 
@@ -453,7 +460,7 @@ The goal is to reach:
 
 ### 7.1 Startup Sequence
 
-In `labmand` main:
+- [ ] In `labmand` main:
 
 1. Initialise telemetry.
 2. Parse CLI arguments (config path, log level, maybe `--foreground`).
@@ -473,7 +480,7 @@ In `labmand` main:
 
 ### 7.2 Shutdown Sequence
 
-- On shutdown signal or fatal error:
+- [ ] On shutdown signal or fatal error:
 
   - Stop accepting new requests (proxy server stop).
   - Wait for in-flight requests to complete (within timeout).
@@ -504,7 +511,7 @@ In `labmand` main:
 
 ### 8.1 Basic Commands
 
-Implement `labman` with `clap`:
+- [ ] Implement `labman` with `clap`:
 
 - `labman config validate [--path <file>]`
   - Load and validate config using `labman-config`.
@@ -522,14 +529,14 @@ Implement `labman` with `clap`:
 
 ### 8.2 Future Commands
 
-- `labman logs` (tail systemd logs).
-- `labman reload` (signal daemon to reload config).
+- [ ] `labman logs` (tail systemd logs).
+- [ ] `labman reload` (signal daemon to reload config).
 
 **Exit criteria:**
 
-- CLI builds and provides at least:
-  - `config validate`.
-  - `status` based on simple local introspection (can be stubbed initially).
+- [ ] CLI builds and provides at least:
+  - [ ] `config validate`.
+  - [ ] `status` based on simple local introspection (can be stubbed initially).
 
 ---
 
@@ -539,7 +546,7 @@ Implement `labman` with `clap`:
 
 ### 9.1 Testing & QA
 
-- Add:
+- [ ] Add:
   - Unit tests across all crates.
   - Integration tests:
     - Fake control-plane.
@@ -549,7 +556,7 @@ Implement `labman` with `clap`:
 
 ### 9.2 Security Review
 
-- Validate the security invariants described in `architecture.md`:
+- [ ] Validate the security invariants described in `architecture.md`:
 
   - No LAN exposure through WG interface.
   - Only proxy binds to WG address.
@@ -562,12 +569,12 @@ Implement `labman` with `clap`:
 
 ### 9.3 Documentation & UX
 
-- Update:
+- [ ] Update:
   - `readme.md` with accurate quick start steps.
   - `architecture.md` sections with references to code modules where applicable.
   - A sample `labman.toml` reflecting all config fields and examples.
 
-- Ensure:
+- [ ] Ensure:
   - Error messages are actionable and clear (e.g., “cannot connect to endpoint `ollama-local` at `http://127.0.0.1:11434/v1`: connection refused — is Ollama running?”).
 
 ---
@@ -576,7 +583,7 @@ Implement `labman` with `clap`:
 
 These are beyond “first complete implementation” but align with the architecture:
 
-- Support for:
+- [ ] Support for:
   - More endpoint types / protocols.
   - Benchmark-based scheduling (latency, VRAM, cost).
   - Node mode controls via control-plane (maintenance, drain).
