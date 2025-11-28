@@ -46,8 +46,8 @@ The goal is to reach:
 - [ ] Define minimal cross-crate dependency graph (no implementation yet):
   - [x] `labman-config` depends on `labman-core`
   - [ ] `labman-wireguard` depends on `labman-core`
-  - [ ] `labman-endpoints` depends on `labman-core`
-  - [ ] `labman-proxy` depends on `labman-core`, `labman-endpoints`
+  - [x] `labman-endpoints` depends on `labman-core`
+  - [x] `labman-proxy` depends on `labman-core`, `labman-endpoints`
   - [ ] `labman-client` depends on `labman-core`
   - [x] `labman-telemetry` depends on `tracing`, `tracing-subscriber`
   - [x] `labmand` depends on all above crates
@@ -321,6 +321,8 @@ The goal is to reach:
   - [ ] Health status transitions.
 - [ ] Simple integration test using a mocked local HTTP server.
 
+(Note: Core Stage 4 functionality (registry, health checks, model discovery, scheduling, and integration with `labmand` and `labman-proxy`) is implemented and exercised manually against real endpoints; automated tests remain to be added for full exit criteria.)
+
 ---
 
 ## Stage 5 — Proxy Layer (`labman-proxy`)
@@ -332,8 +334,8 @@ The goal is to reach:
 - [x] Implement `labman-proxy` crate with initial HTTP server skeleton:
 
   - [x] Expose a `/v1/models` route backed by `EndpointRegistry::to_node_capabilities().models`.
-  - [ ] Wire proxy HTTP listener into `labmand`/`labman-server` on the WG-bound address.
-  - [ ] Add `POST /v1/chat/completions`
+  - [x] Wire proxy HTTP listener into `labmand` on a local address/port (currently 127.0.0.1 + `proxy.listen_port`; to be moved to the WG-bound address in Stage 3/5 integration).
+  - [x] Add `POST /v1/chat/completions`
   - [ ] Add `POST /v1/completions`
 
 - [ ] Ensure:
@@ -342,20 +344,21 @@ The goal is to reach:
 
 ### 5.2 Request Handling
 
-- [ ] For `/v1/models`:
-  - [ ] Return aggregated model list from `EndpointRegistry::to_node_capabilities().models` in OpenAI `list` format.
+- [x] For `/v1/models`:
+  - [x] Return aggregated model list from `EndpointRegistry::to_node_capabilities().models` in OpenAI `list` format.
 
-- [ ] For `/v1/chat/completions` and `/v1/completions`:
-  - Parse incoming OpenAI-compatible request body:
-    - Extract `model` field.
-    - Handle both streaming (`stream: true`) and non-streaming.
-  - Use `EndpointRegistry::select_endpoint_for_model(model_id)` to choose an endpoint.
-  - Forward HTTP request to `endpoint.base_url`:
-    - Transform path if necessary (e.g., `base_url` already includes `/v1`).
-    - Stream response back to caller.
-  - Handle:
-    - Timeouts via `LabmanError::Timeout`.
-    - Endpoint-level errors via `LabmanError::Endpoint`/`InvalidResponse`.
+- [x] For `/v1/chat/completions`:
+  - [x] Parse incoming OpenAI-compatible request body:
+    - [x] Extract `model` field.
+    - [x] Handle both streaming (`stream: true`) and non-streaming.
+  - [x] Use `EndpointRegistry::select_endpoint_for_model(model_id)` to choose an endpoint.
+  - [x] Forward HTTP request to `endpoint.base_url`:
+    - [x] Transform path if necessary (current implementation appends `/chat/completions` to the configured base URL, which is expected to include `/v1`).
+    - [x] Stream response back to caller.
+  - [x] Handle:
+    - [x] Upstream connection and body-read errors mapped to appropriate HTTP status codes.
+- [ ] For `/v1/completions`:
+  - [ ] Implement similar request handling and forwarding as `chat/completions`.
 
 - Provide clear error surfaces:
   - If no endpoint has the model: return `LabmanError::ModelNotFound`.
@@ -363,19 +366,19 @@ The goal is to reach:
 
 ### 5.3 Streaming Support
 
-- [ ] Implement streaming (SSE-style or chunked JSON lines as per OpenAI):
+- [x] Implement streaming (SSE-style or chunked JSON lines as per OpenAI):
 
-  - Proxy streaming responses from local endpoints to upstream client.
-  - Carefully handle backpressure and cancellation:
-    - Cancellation should decrement active count on endpoint.
-    - Partially streamed responses should be logged appropriately.
+  - [x] Proxy streaming responses from local endpoints to upstream client by piping the upstream byte stream.
+  - [ ] Carefully handle backpressure and cancellation:
+    - [ ] Cancellation should decrement active count on endpoint.
+    - [ ] Partially streamed responses should be logged appropriately.
 
 ### 5.4 Telemetry
 
 - [ ] Use `tracing` to log:
   - [ ] Request start and end (per request ID).
   - [ ] Endpoint selection decision.
-  - [ ] Errors and timeouts.
+  - [x] Errors and upstream failures/timeouts in proxy handlers.
 
 ### 5.5 Daemon Integration
 
@@ -383,7 +386,7 @@ The goal is to reach:
   - [ ] After WG + endpoints:
     - [ ] Obtain WG IP from `WireGuardInterface`.
     - [ ] Derive `listen_addr = (wg_ip, config.proxy.listen_port)`.
-    - [ ] Start proxy server with graceful shutdown support.
+    - [x] Start proxy server with graceful shutdown support, currently bound to `127.0.0.1:config.proxy.listen_port` (to be switched to the WG IP once Stage 3 is implemented).
 
 **Exit criteria:**
 
