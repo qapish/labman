@@ -397,42 +397,6 @@ impl EndpointRegistry {
                 });
             }
 
-            /// Rebuild the `model_index` from the current `discovered_models` of each
-            /// endpoint. This is called after a successful model discovery pass.
-            impl EndpointRegistry {
-                fn rebuild_model_index(&mut self) {
-                    self.model_index.clear();
-
-                    for (endpoint_name, entry) in self.endpoints.iter() {
-                        for model in &entry.discovered_models {
-                            let id = model.id.clone();
-                            self.model_index
-                                .entry(id)
-                                .or_insert_with(Vec::new)
-                                .push(endpoint_name.clone());
-                        }
-                    }
-                }
-
-                /// Skeleton for selecting an endpoint for a given model.
-                ///
-                /// For now this is a minimal implementation:
-                /// - Looks up the model in `model_index`.
-                /// - Returns the first matching endpoint entry, if any.
-                ///
-                /// Future work:
-                /// - Integrate health status and `active_requests`.
-                /// - Implement better scheduling (round-robin, least-loaded, etc.).
-                pub fn select_endpoint_for_model(
-                    &self,
-                    model_id: &str,
-                ) -> Option<(&String, &EndpointEntry)> {
-                    let endpoint_names = self.model_index.get(model_id)?;
-                    let first = endpoint_names.first()?;
-                    self.endpoints.get_key_value(first)
-                }
-            }
-
             entry.discovered_models = models;
 
             if let Some(metrics) = &self.metrics {
@@ -444,6 +408,44 @@ impl EndpointRegistry {
         self.rebuild_model_index();
 
         Ok(())
+    }
+
+    /// Rebuild the `model_index` from the current `discovered_models` of each
+    /// endpoint. This is called after a successful model discovery pass.
+    fn rebuild_model_index(&mut self) {
+        self.model_index.clear();
+
+        for (endpoint_name, entry) in self.endpoints.iter() {
+            for model in &entry.discovered_models {
+                let id = model.id.clone();
+                self.model_index
+                    .entry(id)
+                    .or_insert_with(Vec::new)
+                    .push(endpoint_name.clone());
+            }
+        }
+    }
+
+    /// Select an endpoint for a given model.
+    ///
+    /// Current behaviour:
+    /// - Looks up the model in `model_index`.
+    /// - Filters to endpoints that are currently marked healthy.
+    /// - Returns the first matching endpoint entry, if any.
+    ///
+    /// Future work:
+    /// - Integrate `active_requests` and `max_concurrent`.
+    /// - Implement better scheduling (round-robin, least-loaded, etc.).
+    pub fn select_endpoint_for_model(&self, model_id: &str) -> Option<(&String, &EndpointEntry)> {
+        let endpoint_names = self.model_index.get(model_id)?;
+        for name in endpoint_names {
+            if let Some(entry) = self.endpoints.get(name) {
+                if entry.healthy {
+                    return self.endpoints.get_key_value(name);
+                }
+            }
+        }
+        None
     }
 
     /// Spawn a periodic HTTP-based health checker and model discovery task.
@@ -682,5 +684,107 @@ mod tests {
 
         assert_eq!(info.region.as_deref(), Some("test-region"));
         assert_eq!(info.description.as_deref(), Some("test node"));
+    }
+
+    #[test]
+    fn glob_match_basic_cases() {
+        assert!(glob_match("*", "gpt-4"));
+        assert!(glob_match("gpt-4", "gpt-4"));
+        assert!(glob_match("gpt-*", "gpt-4"));
+        assert!(glob_match("gpt-*", "gpt-3.5"));
+        assert!(glob_match("llama*7b", "llama3-7b"));
+        assert!(!glob_match("gpt-4", "gpt-3.5"));
+        assert!(!glob_match("llama*7b", "llama3-8b"));
+    }
+
+    #[test]
+    fn to_node_capabilities_flattens_models_and_sums_capacity() {
+        let mut cfg = minimal_config();
+        cfg.endpoints = vec![
+            EndpointConfig {
+                name: "ep1".to_string(),
+                base_url: "http://127.0.0.1:1111/v1".to_string(),
+                max_concurrent: Some(2),
+                models_include: None,
+                models_exclude: None,
+            },
+            EndpointConfig {
+                name: "ep2".to_string(),
+                base_url: "http://127.0.0.1:2222/v1".to_string(),
+                max_concurrent: Some(3),
+                models_include: None,
+                models_exclude: None,
+            },
+        ];
+
+        let mut registry = EndpointRegistry::from_config(&cfg).expect("build registry");
+        {
+            let ep1 = registry.get_mut("ep1").unwrap();
+            ep1.discovered_models = vec![
+                ModelDescriptor::with_details("gpt-4", None, Some("openai".to_string())),
+                ModelDescriptor::with_details("gpt-3.5", None, Some("openai".to_string())),
+            ];
+
+            let ep2 = registry.get_mut("ep2").unwrap();
+            ep2.discovered_models = vec![
+                ModelDescriptor::with_details("gpt-4", None, Some("openai".to_string())),
+                ModelDescriptor::with_details("llama3", None, Some("meta".to_string())),
+            ];
+        }
+
+        let caps = registry.to_node_capabilities();
+        assert_eq!(caps.endpoint_count, 2);
+        assert_eq!(caps.max_concurrent_requests, Some(5));
+        // We should see unique models across endpoints.
+        let model_ids: std::collections::HashSet<_> =
+            caps.models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(model_ids.len(), 3);
+        assert!(model_ids.contains("gpt-4"));
+        assert!(model_ids.contains("gpt-3.5"));
+        assert!(model_ids.contains("llama3"));
+    }
+
+    #[test]
+    fn rebuild_model_index_and_select_endpoint_for_model_respects_health() {
+        let mut cfg = minimal_config();
+        cfg.endpoints = vec![
+            EndpointConfig {
+                name: "healthy-ep".to_string(),
+                base_url: "http://127.0.0.1:1111/v1".to_string(),
+                max_concurrent: Some(2),
+                models_include: None,
+                models_exclude: None,
+            },
+            EndpointConfig {
+                name: "unhealthy-ep".to_string(),
+                base_url: "http://127.0.0.1:2222/v1".to_string(),
+                max_concurrent: Some(2),
+                models_include: None,
+                models_exclude: None,
+            },
+        ];
+
+        let mut registry = EndpointRegistry::from_config(&cfg).expect("build registry");
+        {
+            let healthy = registry.get_mut("healthy-ep").unwrap();
+            healthy.discovered_models = vec![ModelDescriptor::new("gpt-4")];
+            healthy.healthy = true;
+
+            let unhealthy = registry.get_mut("unhealthy-ep").unwrap();
+            unhealthy.discovered_models = vec![ModelDescriptor::new("gpt-4")];
+            unhealthy.healthy = false;
+        }
+
+        // Rebuild the index after manually adjusting discovered models.
+        registry.rebuild_model_index();
+
+        let selected = registry.select_endpoint_for_model("gpt-4");
+        assert!(selected.is_some());
+        let (name, entry) = selected.unwrap();
+        assert_eq!(name.as_str(), "healthy-ep");
+        assert!(entry.healthy);
+
+        let none = registry.select_endpoint_for_model("non-existent-model");
+        assert!(none.is_none());
     }
 }
