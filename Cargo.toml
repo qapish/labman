@@ -8,7 +8,8 @@ members = ["bin/labman-cli",
     "crates/labman-endpoints",
     "crates/labman-proxy",
     "crates/labman-telemetry",
-    "crates/labman-wireguard"
+    "crates/labman-wireguard",
+    "crates/labman-ws-portman"
 ]
 
 [workspace.package]

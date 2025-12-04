@@ -1,0 +1,24 @@
+[package]
+name = "labman-ws-portman"
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+description = "Portman-facing WebSocket listener and connection tracking for labman"
+authors = ["labman contributors"]
+repository = "https://github.com/qapish/labman"
+readme = "README.md"
+
+[dependencies]
+tokio = { version = "1.37", features = ["rt-multi-thread", "macros", "net", "signal"] }
+axum = { version = "0.7", features = ["ws"] }
+tracing = "0.1"
+futures = "0.3"
+
+# Use workspace anyhow dependency for error handling.
+anyhow = { workspace = true }
+
+# Depend on labman-core for error types once we start integrating properly.
+labman-core = { path = "../labman-core" }
+
+[dev-dependencies]
+tokio = { version = "1.37", features = ["rt-multi-thread", "macros", "net", "signal"] }

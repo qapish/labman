@@ -11,6 +11,7 @@ use labman_endpoints::{EndpointRegistry, EndpointRegistryBuilder};
 use labman_proxy::{ProxyConfig as LabmanProxyConfig, ProxyServer as LabmanProxyServer};
 use labman_server::{LabmanServer, ServerConfig};
 use labman_telemetry;
+use labman_ws_portman::{run_portman_ws_server, PortmanWsConfig};
 use tracing::warn;
 
 /// labmand - labman daemon
@@ -308,35 +309,78 @@ fn run_server_blocking(
 
         tracing::info!("starting labman proxy server on {}", proxy_addr);
 
-        // Run metrics server and proxy server concurrently. Shutdown is
-        // currently driven by whichever server terminates first.
+        // For now, bind the Portman WebSocket listener to a fixed loopback
+        // address. This will later become configurable, but the initial
+        // implementation keeps it local-only and simple.
+        let portman_ws_addr = SocketAddr::from(([127, 0, 0, 1], 9100));
+        let portman_ws_cfg = PortmanWsConfig {
+            bind_addr: portman_ws_addr,
+        };
+
+        tracing::info!("starting Portman WS server on {}", portman_ws_addr);
+
+        // Shared shutdown: when either the HTTP server, proxy, or Portman WS
+        // server finishes (with error or cleanly), we shut down the others.
         let server_handle = tokio::spawn(server.run());
         let proxy_handle = proxy_server.spawn();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let portman_handle = {
+            let shutdown_future = async move {
+                // Resolve when we receive a shutdown signal from the select! below.
+                let _ = shutdown_rx.await;
+            };
+            tokio::spawn(async move {
+                if let Err(e) = run_portman_ws_server(portman_ws_cfg, shutdown_future).await {
+                    tracing::error!("Portman WS server exited with error: {}", e);
+                }
+            })
+        };
 
         tokio::select! {
             res = server_handle => {
                 if let Err(join_err) = res {
+                    let _ = shutdown_tx.send(());
                     return Err::<(), Box<dyn std::error::Error>>(Box::new(std::io::Error::new(
                         std::io::ErrorKind::Other,
                         format!("labman-server join error: {}", join_err),
                     )));
                 }
+                let _ = shutdown_tx.send(());
             }
             res = proxy_handle => {
                 match res {
                     Ok(Ok(())) => {
                         tracing::info!("labman-proxy server exited cleanly");
+                        let _ = shutdown_tx.send(());
                     }
                     Ok(Err(e)) => {
+                        let _ = shutdown_tx.send(());
                         return Err::<(), Box<dyn std::error::Error>>(Box::new(std::io::Error::new(
                             std::io::ErrorKind::Other,
                             format!("labman-proxy error: {}", e),
                         )));
                     }
                     Err(join_err) => {
+                        let _ = shutdown_tx.send(());
                         return Err::<(), Box<dyn std::error::Error>>(Box::new(std::io::Error::new(
                             std::io::ErrorKind::Other,
                             format!("labman-proxy join error: {}", join_err),
+                        )));
+                    }
+                }
+            }
+            res = portman_handle => {
+                match res {
+                    Ok(()) => {
+                        tracing::info!("Portman WS server task exited");
+                        let _ = shutdown_tx.send(());
+                    }
+                    Err(join_err) => {
+                        let _ = shutdown_tx.send(());
+                        return Err::<(), Box<dyn std::error::Error>>(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("Portman WS server join error: {}", join_err),
                         )));
                     }
                 }
