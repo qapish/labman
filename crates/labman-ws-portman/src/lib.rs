@@ -134,7 +134,10 @@ pub async fn run_portman_ws_server(
 
     let app = Router::new()
         .route("/agent", get(handle_ws_upgrade))
-        .with_state(state.clone());
+        .with_state(state.clone())
+        // Provide ConnectInfo&lt;SocketAddr&gt; so handlers using `ConnectInfo`
+        // can extract the peer address.
+        .into_make_service_with_connect_info::<SocketAddr>();
 
     let listener = TcpListener::bind(config.bind_addr).await?;
     info!(addr = %config.bind_addr, "Portman WS server listening");

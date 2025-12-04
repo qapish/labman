@@ -214,11 +214,15 @@ fn run_server_blocking(
     bind_addr: SocketAddr,
     config: LabmanConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    tracing::debug!("run_server_blocking: constructing Tokio runtime");
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
 
+    tracing::debug!("run_server_blocking: entering async block via rt.block_on");
     let result: Result<(), Box<dyn std::error::Error>> = rt.block_on(async move {
+        tracing::debug!("run_server_blocking: entered async block");
+
         // Start the labman HTTP server (labman-server). For now this owns the
         // /metrics endpoint and any future HTTP/WS routes.
         let server_cfg = ServerConfig { bind_addr };
@@ -331,24 +335,46 @@ fn run_server_blocking(
                 let _ = shutdown_rx.await;
             };
             tokio::spawn(async move {
-                if let Err(e) = run_portman_ws_server(portman_ws_cfg, shutdown_future).await {
-                    tracing::error!("Portman WS server exited with error: {}", e);
-                }
+                // Propagate the result so the caller can distinguish between
+                // a clean shutdown and an unexpected error/early exit.
+                run_portman_ws_server(portman_ws_cfg, shutdown_future).await
             })
         };
 
+        tracing::debug!(
+            "run_server_blocking: about to enter tokio::select! for server/proxy/Portman WS"
+        );
         tokio::select! {
             res = server_handle => {
-                if let Err(join_err) = res {
-                    let _ = shutdown_tx.send(());
-                    return Err::<(), Box<dyn std::error::Error>>(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("labman-server join error: {}", join_err),
-                    )));
+                tracing::debug!("tokio::select! completed: labman-server branch");
+                match res {
+                    Ok(Ok(())) => {
+                        // HTTP server exited cleanly, which is unexpected in normal operation.
+                        let _ = shutdown_tx.send(());
+                        return Err::<(), Box<dyn std::error::Error>>(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            "labman HTTP server exited unexpectedly",
+                        )));
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!("labman HTTP server error: {}", e);
+                        let _ = shutdown_tx.send(());
+                        return Err::<(), Box<dyn std::error::Error>>(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("labman HTTP server error: {}", e),
+                        )));
+                    }
+                    Err(join_err) => {
+                        let _ = shutdown_tx.send(());
+                        return Err::<(), Box<dyn std::error::Error>>(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("labman-server join error: {}", join_err),
+                        )));
+                    }
                 }
-                let _ = shutdown_tx.send(());
             }
             res = proxy_handle => {
+                tracing::debug!("tokio::select! completed: labman-proxy branch");
                 match res {
                     Ok(Ok(())) => {
                         tracing::info!("labman-proxy server exited cleanly");
@@ -371,10 +397,25 @@ fn run_server_blocking(
                 }
             }
             res = portman_handle => {
+                tracing::debug!("tokio::select! completed: Portman WS branch");
                 match res {
-                    Ok(()) => {
-                        tracing::info!("Portman WS server task exited");
+                    Ok(Ok(_subscribers)) => {
+                        // If we reach here without an explicit shutdown being triggered first,
+                        // the Portman WS server has exited unexpectedly.
+                        tracing::error!("Portman WS server exited unexpectedly");
                         let _ = shutdown_tx.send(());
+                        return Err::<(), Box<dyn std::error::Error>>(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            "Portman WS server exited unexpectedly",
+                        )));
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!("Portman WS server error: {}", e);
+                        let _ = shutdown_tx.send(());
+                        return Err::<(), Box<dyn std::error::Error>>(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("Portman WS server error: {}", e),
+                        )));
                     }
                     Err(join_err) => {
                         let _ = shutdown_tx.send(());
@@ -387,8 +428,17 @@ fn run_server_blocking(
             }
         }
 
+        tracing::debug!(
+            "run_server_blocking: tokio::select! completed, returning from async block"
+        );
+
         Ok(())
     });
+
+    tracing::debug!(
+        "run_server_blocking: async block completed with result: {}",
+        if result.is_ok() { "Ok" } else { "Err" }
+    );
 
     result
 }
