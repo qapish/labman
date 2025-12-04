@@ -64,6 +64,42 @@ pub struct EndpointRegistry {
     /// This is derived from `EndpointEntry.discovered_models` and is intended
     /// for use by routing and capability reporting logic.
     model_index: HashMap<String, Vec<String>>,
+
+    /// Index of opaque model slugs (as seen in the OpenAI `model` field when
+    /// requests are routed via the control plane) to concrete tenant/endpoint/
+    /// model triples.
+    ///
+    /// The control plane is free to define the exact slug format (e.g.
+    /// `base62(SHA-256(tenant + "\n" + endpoint_slug + "\n" + model)[0..8])`),
+    /// but labman must be able to reproduce it in order to build this mapping.
+    ///
+    /// This index allows the proxy layer to:
+    /// - Treat the incoming `model` field as an opaque slug.
+    /// - Resolve it to a specific endpoint and concrete model ID.
+    /// - Rewrite the upstream request so that the local endpoint sees the
+    ///   original model string it understands.
+    hash_index: HashMap<String, HashedModelMapping>,
+}
+
+/// Mapping from an opaque model slug (as seen in the OpenAI `model` field
+/// when requests are routed via the control plane) to a concrete
+/// tenant/endpoint/model triple.
+///
+/// The slug is typically derived from:
+/// `tenant + "\n" + endpoint_slug + "\n" + model_id`
+/// and then encoded (e.g. via a hash+base62), but labman treats it as an
+/// opaque string and only relies on this mapping.
+#[derive(Debug, Clone)]
+pub struct HashedModelMapping {
+    /// Optional tenant identifier for this model. When `None`, the model is
+    /// assumed to belong to the operator's default tenant.
+    pub tenant: Option<String>,
+
+    /// Logical endpoint name as configured in `LabmanConfig`.
+    pub endpoint_name: String,
+
+    /// Concrete model identifier on the endpoint (e.g. "mistral-nemo:12b").
+    pub model_id: String,
 }
 
 /// A single entry in the registry.
@@ -74,6 +110,20 @@ pub struct EndpointEntry {
 
     /// Static configuration metadata (concurrency limits, filters).
     pub meta: EndpointMeta,
+
+    /// Optional tenant identifier for this endpoint.
+    ///
+    /// When set, this endpoint is treated as belonging to the specified tenant
+    /// from the control plane's perspective. This allows operators offering
+    /// colocation to attribute usage and compensation per tenant without
+    /// having to build their own reporting layer; the control plane can use
+    /// this field to drive accounting and analytics.
+    ///
+    /// When omitted, the endpoint is assumed to belong to the operator's
+    /// default tenant. Any tenant identifier embedded in incoming model slugs
+    /// that does not match a configured tenant will also be treated as the
+    /// operator's default tenant.
+    pub tenant: Option<String>,
 
     /// Current number of active requests (for scheduling, not yet used).
     active_requests: usize,
@@ -117,6 +167,7 @@ impl EndpointRegistry {
             let entry = EndpointEntry {
                 endpoint,
                 meta,
+                tenant: ep_cfg.tenant.clone(),
                 active_requests: 0,
                 healthy: false,
                 discovered_models: Vec::new(),
@@ -129,6 +180,7 @@ impl EndpointRegistry {
             endpoints,
             metrics: None,
             model_index: HashMap::new(),
+            hash_index: HashMap::new(),
         })
     }
 
@@ -334,8 +386,13 @@ impl EndpointRegistry {
     /// - Parses the response into `ModelListResponse`.
     /// - Applies `models_include` / `models_exclude` filters.
     /// - Populates `discovered_models` with the filtered list.
+    /// - Updates both the plain `model_index` and the slug-based `hash_index`.
     pub async fn discover_models_all_http(&mut self) -> Result<()> {
         let client = reqwest::Client::new();
+
+        // Clear and rebuild both indices from scratch on each discovery pass.
+        self.model_index.clear();
+        self.hash_index.clear();
 
         for (name, entry) in self.endpoints.iter_mut() {
             if !entry.healthy {
@@ -414,33 +471,58 @@ impl EndpointRegistry {
                 });
             }
 
+            // Update the entry's discovered models.
             entry.discovered_models = models;
+
+            // Update model_index and hash_index for this endpoint.
+            let endpoint_slug = entry
+                .endpoint
+                .base_url
+                .trim()
+                .trim_start_matches("http://")
+                .trim_start_matches("https://")
+                .to_string();
+
+            let tenant_str = entry.tenant.as_deref().unwrap_or("");
+
+            for model in &entry.discovered_models {
+                // Plain model index: model_id -> [endpoint_names...]
+                self.model_index
+                    .entry(model.id.clone())
+                    .or_insert_with(Vec::new)
+                    .push(name.clone());
+
+                // Slug-based index: opaque slug -> (tenant, endpoint_name, model_id)
+                let slug =
+                    labman_core::slug::encode_model_slug(tenant_str, &endpoint_slug, &model.id);
+
+                self.hash_index.insert(
+                    slug,
+                    HashedModelMapping {
+                        tenant: entry.tenant.clone(),
+                        endpoint_name: name.clone(),
+                        model_id: model.id.clone(),
+                    },
+                );
+            }
 
             if let Some(metrics) = &self.metrics {
                 metrics.record_request_end(Some(name.as_str()), None, true, None);
             }
         }
 
-        // Rebuild the model index from the newly discovered models.
-        self.rebuild_model_index();
-
         Ok(())
     }
 
-    /// Rebuild the `model_index` from the current `discovered_models` of each
-    /// endpoint. This is called after a successful model discovery pass.
-    fn rebuild_model_index(&mut self) {
-        self.model_index.clear();
-
-        for (endpoint_name, entry) in self.endpoints.iter() {
-            for model in &entry.discovered_models {
-                let id = model.id.clone();
-                self.model_index
-                    .entry(id)
-                    .or_insert_with(Vec::new)
-                    .push(endpoint_name.clone());
-            }
-        }
+    /// Look up a previously recorded hashed/slugged model identifier and
+    /// return the associated tenant/endpoint/model triple, if known.
+    ///
+    /// The `model_slug` parameter is the exact string that appears in the
+    /// OpenAI `model` field when requests are routed via the control plane.
+    /// Labman treats it as opaque and only relies on the mapping built during
+    /// model discovery.
+    pub fn lookup_hashed_model(&self, model_slug: &str) -> Option<&HashedModelMapping> {
+        self.hash_index.get(model_slug)
     }
 
     /// Select an endpoint for a given model.

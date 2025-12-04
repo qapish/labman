@@ -19,6 +19,7 @@ use labman_endpoints::EndpointRegistry;
 use labman_telemetry::MetricsRecorder;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
+use tracing;
 use tracing::{error, info};
 
 /// Error type for the proxy server.
@@ -230,35 +231,61 @@ async fn get_models(State(state): State<ProxyState>) -> Json<ModelsResponse> {
 ///
 /// This:
 /// - Parses the incoming request as `ChatCompletionRequest`.
-/// - Uses `EndpointRegistry::select_endpoint_for_model` to choose an upstream.
+/// - Treats the incoming `model` field as an opaque, control‑plane provided
+///   slug encoding `(tenant, endpoint_slug, model_id)`.
+/// - Uses `EndpointRegistry::lookup_hashed_model` to resolve the slug to a
+///   concrete endpoint and model.
+/// - Rewrites the upstream request so that the selected endpoint sees the
+///   original model identifier it understands.
 /// - Proxies the request body to the selected endpoint's `/chat/completions`.
 /// - Streams or buffers the response back to the caller, depending on `stream`.
 async fn post_chat_completions(
     State(state): State<ProxyState>,
     axum::Json(req_body): axum::Json<ChatCompletionRequest>,
 ) -> Result<axum::response::Response, axum::http::StatusCode> {
-    let model_id = req_body.model.clone();
+    // The incoming `model` field is an opaque slug chosen by the control
+    // plane. Resolve it to a concrete endpoint/model pair using the registry's
+    // slug index.
+    let model_slug = req_body.model.clone();
 
-    // Select an appropriate endpoint for the requested model.
-    let (endpoint_name, endpoint_base_url) = {
+    let (endpoint_name, endpoint_base_url, real_model_id) = {
         let registry = state.registry.lock().await;
-        if let Some((name, entry)) = registry.select_endpoint_for_model(&model_id) {
-            (name.clone(), entry.endpoint.base_url.clone())
-        } else {
-            // No endpoint exposes this model.
-            state.metrics.record_error(None, "model_not_found");
-            return Err(axum::http::StatusCode::BAD_REQUEST);
+        match registry.lookup_hashed_model(&model_slug) {
+            Some(mapping) => {
+                if let Some(entry) = registry.get(&mapping.endpoint_name) {
+                    (
+                        mapping.endpoint_name.clone(),
+                        entry.endpoint.base_url.clone(),
+                        mapping.model_id.clone(),
+                    )
+                } else {
+                    // Inconsistent registry state: mapping refers to a missing endpoint.
+                    state
+                        .metrics
+                        .record_error(None, "hashed_model_endpoint_missing");
+                    return Err(axum::http::StatusCode::BAD_REQUEST);
+                }
+            }
+            None => {
+                // No mapping for this slug; treat as unknown model.
+                state.metrics.record_error(None, "hashed_model_not_found");
+                return Err(axum::http::StatusCode::BAD_REQUEST);
+            }
         }
     };
 
     let base = endpoint_base_url.trim_end_matches('/');
     let upstream_url = format!("{}/chat/completions", base);
 
-    // Forward the request to the selected upstream using reqwest.
+    // Forward the request to the selected upstream using reqwest. Rewrite the
+    // `model` field so that the upstream sees the concrete model identifier it
+    // expects rather than the opaque slug.
     let client = reqwest::Client::new();
+    let mut upstream_body = req_body;
+    upstream_body.model = real_model_id.clone();
 
     let started = std::time::Instant::now();
-    let upstream_resp = match client.post(&upstream_url).json(&req_body).send().await {
+    let upstream_resp = match client.post(&upstream_url).json(&upstream_body).send().await {
         Ok(resp) => resp,
         Err(err) => {
             tracing::warn!(
@@ -277,7 +304,7 @@ async fn post_chat_completions(
     let headers = upstream_resp.headers().clone();
 
     // Decide whether this is streaming based on the original request.
-    let is_streaming = req_body.stream.unwrap_or(false);
+    let is_streaming = upstream_body.stream.unwrap_or(false);
 
     if is_streaming {
         // Streaming: pipe the bytes stream from upstream to the client.
@@ -299,7 +326,7 @@ async fn post_chat_completions(
         let latency = started.elapsed().as_secs_f64();
         state.metrics.record_request_end(
             Some(endpoint_name.as_str()),
-            Some(model_id.as_str()),
+            Some(model_slug.as_str()),
             status.is_success(),
             Some(latency),
         );
@@ -325,7 +352,7 @@ async fn post_chat_completions(
         let latency = started.elapsed().as_secs_f64();
         state.metrics.record_request_end(
             Some(endpoint_name.as_str()),
-            Some(model_id.as_str()),
+            Some(model_slug.as_str()),
             status.is_success(),
             Some(latency),
         );

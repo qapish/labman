@@ -82,28 +82,33 @@ http://<wg-ip-of-node>:8080/v1/chat/completions
 
 ```
 
-### Step 2 — labmand selects an endpoint
-labmand reads the model from the request and picks a local endpoint that supports it:
+### Step 2 — control-plane selects an endpoint and model slug
+The distributed inference gateway (control-plane) decides **which tenant, which endpoint, and which concrete model** should serve the request based on:
 
-- vLLM  
-- Ollama  
-- llama.cpp  
-- mistral.rs  
-- anything OpenAI-compatible  
+- historical latency and reliability per node/endpoint  
+- reported capabilities and health from labman  
+- its own accounting and scheduling policies  
 
-The decision is based on:
-- endpoint model list
-- optional concurrency limits
-- health history
+It then encodes the chosen `(tenant, endpoint_slug, model_id)` triple into an opaque **model slug** and sends a standard OpenAI-compatible request where the `model` field contains this slug.
+
+labmand does **not** make global endpoint/model selection decisions; it only resolves the opaque `model` slug into a specific local endpoint and concrete model identifier.
 
 ### Step 3 — local proxy → endpoint
-labmand forwards the OpenAI request to the selected local endpoint:
+labmand:
+
+1. Treats the incoming OpenAI `model` field as an **opaque slug** supplied by the control-plane.
+2. Resolves this slug into a `(tenant, endpoint_name, model_id)` triple using its local registry:
+   - `tenant` is used for attribution/compensation and observability.
+   - `endpoint_name` identifies a specific local endpoint.
+   - `model_id` is the actual model string that endpoint understands (e.g. `mistral-nemo:12b`).
+3. Rewrites the upstream request so that the endpoint sees the concrete `model_id` instead of the slug.
+4. Forwards the OpenAI request to the selected local endpoint:
 
 ```
 
-POST [http://127.0.0.1:11434/v1/chat/completions](http://127.0.0.1:11434/v1/chat/completions)
+POST http://127.0.0.1:11434/v1/chat/completions
 
-````
+```
 
 It then streams the response back to the control-plane.
 

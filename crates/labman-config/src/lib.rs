@@ -354,6 +354,21 @@ pub struct EndpointConfig {
     /// Applied after `models_include` (if any).
     #[serde(default)]
     pub models_exclude: Option<Vec<String>>,
+
+    /// Optional tenant identifier for this endpoint.
+    ///
+    /// When set, this endpoint is treated as belonging to the specified tenant
+    /// from the control plane's perspective. This allows operators offering
+    /// colocation to attribute usage and compensation per tenant without
+    /// having to build their own reporting layer; the control plane can use
+    /// this field to drive accounting and analytics.
+    ///
+    /// When omitted, the endpoint is assumed to belong to the operator's
+    /// default tenant. Any tenant identifier embedded in incoming model slugs
+    /// that does not match a configured tenant will also be treated as the
+    /// operator's default tenant.
+    #[serde(default)]
+    pub tenant: Option<String>,
 }
 
 /// Load configuration from a specific file path.

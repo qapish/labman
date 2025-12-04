@@ -14,7 +14,7 @@ internet.
 - A secure post-quantum WireGuard tunnel (via Rosenpass) back to the control plane  
 - A unified OpenAI-compatible API exposed over that tunnel
 - Automatic discovery of your local LLM servers (Ollama, vLLM, llama.cpp, mistral.rs, etc.)  
-- Basic local scheduling and health checking  
+- Local health checking and capability reporting  
 - Registration + heartbeat to the control-plane  
 - Zero inbound ports required on your network  
 - Full transparency: all code is open-source and auditable  
@@ -52,7 +52,7 @@ labman simply **manages**, **proxies**, and **reports**.
 - 🔒 **End-to-end encrypted post-quantum WireGuard tunnel (Rosenpass)**
 - 🧰 **Supports multiple local LLM endpoints**
 - 🔌 **Works with any OpenAI-compatible server**
-- 🎛️ **Local model-aware routing**
+- 🎛️ **Model-aware routing driven by the control plane**
 - 🌡️ **Endpoint health checks**
 - 💬 **Unified OpenAI API served over the tunnel**
 - 🫀 **Automatic control-plane heartbeat**
@@ -76,7 +76,7 @@ labman simply **manages**, **proxies**, and **reports**.
      │   (this project)    │
      └───────┬────────────┘
   local LAN  │
-             │ selects endpoint based on model
+             │ resolves opaque model slugs to local endpoints
 ```
 
 ┌─────────────┼───────────────┐
@@ -88,7 +88,8 @@ labman simply **manages**, **proxies**, and **reports**.
 ```
 
 labmand exposes a single OpenAI-compatible API to the control plane.
-Internally it selects the correct endpoint.
+Internally it resolves opaque model identifiers (slugs) provided by the control plane
+into concrete local endpoints and model IDs, and then proxies requests accordingly.
 
 ---
 

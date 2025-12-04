@@ -5,6 +5,7 @@
 //! - **Error types**: Comprehensive error handling with [`LabmanError`] and [`Result`]
 //! - **Endpoint types**: Representation of LLM endpoints, health tracking, and model discovery
 //! - **Node types**: Node identity, capabilities, and status reporting for control plane communication
+//! - **Helpers**: Shared utilities such as model slug encoding for control‑plane routing.
 //!
 //! # Overview
 //!
@@ -55,6 +56,7 @@
 pub mod endpoint;
 pub mod error;
 pub mod node;
+pub mod slug;
 
 // Re-export commonly used types for convenience
 pub use endpoint::{Endpoint, EndpointHealth, ModelDescriptor, ModelListResponse};

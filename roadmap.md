@@ -327,7 +327,7 @@ The goal is to reach:
 
 ## Stage 5 — Proxy Layer (`labman-proxy`)
 
-**Objective:** Expose a unified OpenAI-compatible API over the WireGuard interface, routing to local endpoints.
+**Objective:** Expose a unified OpenAI-compatible API over the WireGuard interface, resolving opaque, control-plane provided model slugs to specific local endpoints and models.
 
 ### 5.1 HTTP Server Skeleton
 
@@ -345,13 +345,14 @@ The goal is to reach:
 ### 5.2 Request Handling
 
 - [x] For `/v1/models`:
-  - [x] Return aggregated model list from `EndpointRegistry::to_node_capabilities().models` in OpenAI `list` format.
+  - [x] Return aggregated model list from `EndpointRegistry::to_node_capabilities().models` in OpenAI `list` format for OpenAI compatibility, while providing richer per-endpoint/per-tenant model data to the control plane via a separate API.
 
 - [x] For `/v1/chat/completions`:
   - [x] Parse incoming OpenAI-compatible request body:
-    - [x] Extract `model` field.
+    - [x] Extract `model` field (treated as an opaque control-plane provided slug).
     - [x] Handle both streaming (`stream: true`) and non-streaming.
-  - [x] Use `EndpointRegistry::select_endpoint_for_model(model_id)` to choose an endpoint.
+  - [x] Use `EndpointRegistry`’s slug index to resolve the opaque `model` slug into a concrete `(tenant, endpoint_name, model_id)` triple selected by the control plane.
+  - [x] Rewrite the upstream request so that the selected endpoint sees the concrete `model_id` it understands.
   - [x] Forward HTTP request to `endpoint.base_url`:
     - [x] Transform path if necessary (current implementation appends `/chat/completions` to the configured base URL, which is expected to include `/v1`).
     - [x] Stream response back to caller.
