@@ -510,38 +510,207 @@ The goal is to reach:
 
 ---
 
-## Stage 8 — CLI Tool (`labman`)
+## Stage 8 — Protocol & WebSocket Integration (Portman ⇄ labman ⇄ Conplane)
 
-**Objective:** Provide an operator-friendly CLI for common tasks.
+**Objective:** Implement the messaging protocol defined in `protocol.md` over WebSockets, with labman acting as the proxy between Portman (downstream) and Conplane (upstream).
 
-### 8.1 Basic Commands
+This stage turns labman from an HTTP-only control-plane client into a full **WS protocol relay** implementing:
 
-- [ ] Implement `labman` with `clap`:
+- The common **envelope** format
+- Portman → Conplane upstream messages
+- Conplane → Portman downstream directives
+- Robust connection management and routing behavior as described in `protocol.md` (esp. Section 6, “Labman Behaviour”).
 
-- `labman config validate [--path <file>]`
-  - Load and validate config using `labman-config`.
+### 8.1 Protocol Types / Crate
 
-- `labman endpoints list`
-  - Query local daemon API (e.g., Unix socket or HTTP localhost endpoint) to list endpoints, health, models.
+- [ ] Introduce a dedicated protocol module or crate (e.g. `labman-protocol` or `labman-core::protocol`) that defines:
 
-- `labman status`
-  - Show summarized node status:
-    - Node ID.
-    - WG interface status.
-    - Healthy/total endpoints.
-    - Recently advertised models.
-    - Last heartbeat.
+  - [ ] `Envelope` type matching the spec in `protocol.md`:
+    - `msg_id`
+    - `site_id`
+    - `agent_id`
+    - `direction`
+    - `kind`
+    - `ts`
+    - `payload` (generic or enum)
 
-### 8.2 Future Commands
+  - [ ] Strongly-typed payload structs for key message families (names following `protocol.md`):
 
-- [ ] `labman logs` (tail systemd logs).
-- [ ] `labman reload` (signal daemon to reload config).
+    - Agent → Conplane (upstream):
+      - [ ] `RegisterAgent`
+      - [ ] `Heartbeat`
+      - [ ] `Metrics`
+      - [ ] `OfferCapacity`
+      - [ ] `DirectiveProgress`
+      - [ ] `UsageReport`
+      - [ ] Per-model capacity hints (`ResourceProfiles` / `AvailableModelCapacity`)
+
+    - Conplane → Agent (downstream):
+      - [ ] `PreloadModel`
+      - [ ] `EvictModel`
+      - [ ] `AssignWorkload`
+      - [ ] `UpdateRegistry`
+      - [ ] Administrative directives:
+        - [ ] `Drain`
+        - [ ] `RestartAgent`
+
+    - Shared response types:
+      - [ ] `Ack`
+      - [ ] `Error`
+
+  - [ ] A `MessageKind` enum or similar that maps exactly to the `kind` strings in `protocol.md`.
+
+  - [ ] Serialization/deserialization that is:
+    - [ ] Strict about unknown fields and invalid enums where appropriate.
+    - [ ] Forward-compatible enough to ignore optional extensions if `protocol.md` permits.
+
+### 8.2 Downstream WS (Portman → labman)
+
+- [ ] Implement a Portman-facing WebSocket server crate (or module), e.g. `labman-ws-portman`, which:
+
+  - [ ] Listens on a local-only address/port (e.g. `127.0.0.1:<port>`), never on the WireGuard or public interfaces.
+  - [ ] Exposes a single WS endpoint (e.g. `/agent`) that Portman connects to.
+  - [ ] Accepts and validates incoming `Envelope` frames from Portman:
+    - [ ] Decodes JSON into typed `Envelope<T>`.
+    - [ ] Performs basic validation (e.g., `direction == "upstream"`, `agent_id` present).
+  - [ ] Forwards accepted upstream messages into an internal routing channel in labman for delivery to Conplane.
+  - [ ] Sends downstream messages from Conplane to Portman over the same WS connection.
+
+- [ ] Connection lifecycle behavior (per `protocol.md` Section 6.2):
+
+  - [ ] Support initial registration (`RegisterAgent`) on first connect.
+  - [ ] Handle disconnects from Portman:
+    - [ ] Mark agent as disconnected.
+    - [ ] Optionally emit a synthetic “disconnected” notification to Conplane if specified in `protocol.md`.
+  - [ ] Implement basic backpressure / buffering limits to avoid unbounded queues.
+
+### 8.3 Upstream WS (labman → Conplane)
+
+- [ ] Extend `labman-client` to support a persistent WebSocket connection to Conplane:
+
+  - [ ] Connect to configured Conplane WS endpoint (over WireGuard).
+  - [ ] Authenticate as required (e.g., bearer token, headers) per control-plane contract.
+  - [ ] Send and receive `Envelope` frames using the same protocol types as above.
+  - [ ] Implement reconnect behavior:
+    - [ ] Exponential backoff with jitter.
+    - [ ] Limits and logging for repeated failures.
+
+- [ ] Message routing responsibilities (per `protocol.md` Section 6.1 and 6.3):
+
+  - [ ] Forward all valid Portman-originated upstream messages to Conplane:
+    - `RegisterAgent`, `Heartbeat`, `Metrics`, `OfferCapacity`, `DirectiveProgress`, `UsageReport`, capacity hints, etc.
+  - [ ] Receive directives and other downstream messages from Conplane and route them:
+    - [ ] To Portman via the downstream WS server (if connected).
+    - [ ] Handle missing or disconnected Portman:
+      - [ ] Queue or reject with appropriate `Error` / `Ack` semantics per `protocol.md`.
+
+### 8.4 Message Routing & Correlation
+
+- [ ] Implement a routing layer inside `labmand` that:
+
+  - [ ] Maintains mapping between:
+    - `agent_id` (Portman identity)
+    - Active WS connections (Portman side)
+    - Registration / state derived from `RegisterAgent`/`Heartbeat`.
+
+  - [ ] Correlates messages using:
+    - `msg_id` and `directive_id` where applicable, so that:
+      - [ ] Acks/Errors can be matched to originating directives.
+      - [ ] Progress updates can be tied back to specific directives.
+
+  - [ ] Enforces directionality:
+    - [ ] Upstream-only kinds from Portman are never accepted from Conplane, and vice versa.
+
+- [ ] Define internal error handling semantics:
+
+  - [ ] Malformed envelopes:
+    - [ ] Reject with an `Error` message where the protocol permits.
+    - [ ] Optionally close the offending WS connection on repeated failures.
+  - [ ] Unknown `kind`:
+    - [ ] Log and ignore, or respond with a typed `Error`, according to `protocol.md` guidance.
+
+### 8.5 Integration With Existing Components
+
+- [ ] Connect protocol messages to existing labman functionality:
+
+  - [ ] Map `RegisterAgent` payloads to labman’s view of node capabilities and endpoints where appropriate.
+  - [ ] Use `Heartbeat` and `Metrics` messages to update internal telemetry / health data.
+  - [ ] Use directives:
+    - [ ] `PreloadModel` / `EvictModel` / `AssignWorkload` to drive interactions with Portman and influence local routing decisions or pre-warm behavior.
+    - [ ] Administrative directives (`Drain`, `RestartAgent`) to coordinate shutdown / maintenance flows at the Portman layer (labman itself remains a pure proxy).
+
+- [ ] Ensure the OpenAI HTTP proxy (`labman-proxy`) exports enough metrics/usage information for Portman to construct accurate `UsageReport` / capacity hints messages, or for labman to help aggregate that information if the protocol evolves in that direction.
 
 **Exit criteria:**
 
-- [ ] CLI builds and provides at least:
-  - [ ] `config validate`.
-  - [ ] `status` based on simple local introspection (can be stubbed initially).
+- [ ] A dedicated protocol module/crate with strongly-typed message definitions that round-trip to/from the JSON described in `protocol.md`.
+- [ ] A Portman-facing WS server that accepts and forwards upstream messages and delivers downstream directives.
+- [ ] A Conplane-facing WS client that connects over WireGuard and exchanges protocol messages.
+- [ ] A routing layer in `labmand` that cleanly connects Portman and Conplane per the protocol (including basic error and reconnect behavior).
+- [ ] Manual test:
+  - [ ] Portman connects to labman via WS, sends `RegisterAgent` and `Heartbeat`.
+  - [ ] A test Conplane WS server receives them and responds with a directive (`PreloadModel`).
+  - [ ] Portman receives the directive via labman and can acknowledge it.
+
+---
+
+## Stage 9 — CLI Tool (`labman`)
+
+**Objective:** Provide a minimal, purpose-built CLI that integrates cleanly with `labmand` and systemd, focusing on installation and lifecycle hooks rather than a rich interactive UI.
+
+The CLI will primarily be used in:
+
+- Operator workflows to install/update labmand and systemd units.
+- Systemd `ExecStartPre` and `ExecStopPost` (or similar) hooks to run pre/post steps.
+
+### 9.1 Core Subcommands
+
+Implement `labman` with `clap`, providing at least the following subcommands:
+
+- `labman install`
+  - [ ] Install or update the `labmand` binary into a target location (e.g., `/usr/local/bin` by default, configurable via flags).
+  - [ ] Install or update systemd unit files for `labmand` (e.g., `/etc/systemd/system/labmand.service`).
+  - [ ] Optionally perform basic validation (e.g., check that `labman-config` can find a config file).
+  - [ ] Be idempotent where possible: re-running `install` should not break existing setups.
+
+- `labman update`
+  - [ ] Update `labmand` and systemd units to the latest available version (from a release channel or local artifact, depending on distribution choice).
+  - [ ] Optionally restart `labmand` (behind a `--restart` flag) once update is complete.
+  - [ ] Log what changed (binary path, unit file diffs if any).
+
+- `labman pre`
+  - Designed to be invoked from `labmand`’s `ExecStartPre`.
+  - [ ] Perform any necessary pre-start steps, for example:
+    - [ ] Validate configuration file presence and correctness.
+    - [ ] Ensure directories and permissions are correct (e.g., `/var/lib/labman`, `/var/log/labman`).
+    - [ ] Optionally run lightweight checks on external dependencies (WireGuard tools availability, if relevant for current implementation).
+  - [ ] Exit non-zero with a clear, actionable error message if preconditions fail so systemd will not start `labmand`.
+
+- `labman post`
+  - Designed to be invoked from `labmand`’s `ExecStopPost` or equivalent post-stop hook.
+  - [ ] Perform teardown or cleanup steps after `labmand` stops, for example:
+    - [ ] Remove temporary files, sockets, or stale state.
+    - [ ] Optionally clean up transient artifacts related to WireGuard or Rosenpass that are not managed automatically.
+  - [ ] Exit status should reflect whether cleanup completed successfully, while being conservative about not leaving the system in a worse state.
+
+### 9.2 CLI Design Notes
+
+- [ ] Follow the conventions in `agents.md`:
+  - Long-form flags in docs (e.g., `--unit-dir`, `--bin-dir`).
+  - No labman-specific environment variables for core behavior.
+- [ ] Ensure subcommands are:
+  - [ ] Non-interactive by default (suitable for automation and systemd hooks).
+  - [ ] Verbose enough in logs and stdout/stderr to aid debugging.
+
+**Exit criteria:**
+
+- [ ] `labman` binary builds and provides at least:
+  - [ ] `install` and `update` for managing `labmand` and systemd units.
+  - [ ] `pre` and `post` suitable for use in `ExecStartPre`/`ExecStopPost` contexts.
+- [ ] Example systemd unit files in the repo use:
+  - [ ] `ExecStartPre=/usr/bin/labman pre`
+  - [ ] `ExecStopPost=/usr/bin/labman post`
+- [ ] Documentation in `readme.md` and/or a dedicated CLI section describes these subcommands and their usage clearly.
 
 ---
 

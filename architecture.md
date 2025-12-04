@@ -20,6 +20,7 @@ Its goals:
 - Provide a *single secure ingress* (via WireGuard)
 - Aggregate multiple local OpenAI-compatible inference endpoints
 - Expose them as a unified OpenAI API to a remote control-plane
+- Terminate a local WebSocket connection from Portman and a remote WebSocket connection to Conplane, forwarding structured protocol messages between them
 - Maintain a minimal, auditable footprint
 - Avoid requiring any public exposure of the operator’s network
 
@@ -27,6 +28,7 @@ labman does *not* execute models itself — it simply discovers, schedules acros
 and proxies to local LLM endpoints.
 
 ---
+
 
 # 2. High-Level Components
 
@@ -38,8 +40,9 @@ labman-config           Loads and validates ./labman.toml
 labman-wireguard        Manages WG config/bootstrap
 labman-endpoints        Registry of local endpoints + health checking
 labman-proxy            OpenAI proxy exposed over WG
-labman-client           Client for the control-plane API
+labman-client           Client for the control-plane API (HTTP/WS to Conplane)
 labman-telemetry        Logging and tracing setup
+labman-ws-portman       Portman-facing WS server implementing protocol.md (planned / in-progress)
 labman-daemon (labmand) Daemon combining all components
 labman-cli (labman)     Command-line interface for labman
 ```
@@ -58,6 +61,7 @@ Each crate has a single responsibility and a minimal API boundary.
    - validates config
    - brings up post-quantum WireGuard interface (via Rosenpass)
    - registers itself using node token & minimal metadata
+   - establishes a **persistent WebSocket connection to Conplane**, using the envelope format and message types defined in `protocol.md`
 
 The control-plane now knows:
 - node identity
@@ -70,6 +74,7 @@ All of this happens **outbound** from the operator environment.
 There are **zero local inbound ports** required.
 
 ---
+
 
 ## 3.2. Inference flow
 
@@ -142,6 +147,7 @@ labman assumes:
 labman therefore treats the WireGuard connection as a **narrow, single-purpose transport channel** and keeps its impact on the host network as small and explicit as possible.
 
 ---
+
 
 ## 4.2 WireGuard Interface Isolation
 
@@ -231,6 +237,7 @@ The control plane never sees these addresses.
 
 ---
 
+
 ## 4.6 No Remote Execution or System-Level Control
 
 labman avoids the security pitfalls of typical “node agents”:
@@ -264,6 +271,7 @@ Because labman is open-source:
 labman is designed to be a **non-invasive component**: it does its job without weakening or second-guessing an operator's existing security posture.
 
 ---
+
 
 ## 4.8 Post-Quantum Cryptography with Rosenpass
 
@@ -448,6 +456,7 @@ to the control-plane over WG.
 * Receives OpenAI requests
 * Selects an endpoint
 * Forwards & streams responses
+* Emits usage and latency information that can be correlated with protocol-level `UsageReport` / metrics messages
 
 ## 6.6. labman-client
 
@@ -456,10 +465,12 @@ Handles secure outbound communication:
 * node registration
 * capability sync
 * periodic heartbeat
+* WebSocket client lifecycle for Conplane, including reconnect backoff and authentication (WS transport for the messaging protocol)
 
 Planned future support:
 
 * node mode changes (e.g., maintenance mode)
+* future protocol extension handling (new message kinds negotiated via `protocol.md`)
 
 ## 6.7. labman-daemon (labmand binary)
 
@@ -470,8 +481,13 @@ Co-ordinates everything:
 * brings up WG
 * spawns heartbeat/registration tasks
 * launches the proxy server
+* starts the Portman-facing WebSocket server and the Conplane-facing WebSocket client
+* wires the **message routing layer** that implements the envelope format and message types from `protocol.md` (RegisterAgent, Heartbeat, Metrics, Directives, Ack/Error, etc.)
 
 ---
+
+
+
 
 # 7. Extensibility
 
@@ -523,4 +539,4 @@ It prioritises:
 * auditability
 * easy configuration
 
-labman’s purpose is not to run models — it is to **manage**, **aggregate**, and **bridge** them to the network safely.
+labman’s purpose is not to run models — it is to **manage**, **aggregate**, and **bridge** them to the network safely, while implementing the Portman ⇄ labman ⇄ Conplane messaging protocol defined in `protocol.md` via a pair of WebSocket connections and a strict, auditable routing layer.
