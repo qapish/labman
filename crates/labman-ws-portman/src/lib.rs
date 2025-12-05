@@ -13,7 +13,7 @@ use axum::{
     routing::get,
     Router,
 };
-use futures::{future::BoxFuture, Future};
+use futures::{future::BoxFuture, Future, SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
@@ -204,13 +204,17 @@ pub struct ObserverState {
 /// Registry of active observer connections.
 #[derive(Debug, Default)]
 pub struct Observers {
+    /// Per-observer subscription state.
     inner: RwLock<HashMap<u64, ObserverState>>,
+    /// Per-observer WebSocket send handles used for broadcasting events.
+    senders: RwLock<HashMap<u64, tokio::sync::mpsc::UnboundedSender<Message>>>,
 }
 
 impl Observers {
     pub fn new() -> Self {
         Self {
             inner: RwLock::new(HashMap::new()),
+            senders: RwLock::new(HashMap::new()),
         }
     }
 
@@ -222,6 +226,9 @@ impl Observers {
     pub fn remove(&self, connection_id: u64) {
         let mut inner = self.inner.write().expect("Observers poisoned");
         inner.remove(&connection_id);
+
+        let mut senders = self.senders.write().expect("Observers senders poisoned");
+        senders.remove(&connection_id);
     }
 
     pub fn set_subscription(&self, connection_id: u64, kinds: HashSet<StreamKind>) {
@@ -234,6 +241,22 @@ impl Observers {
     pub fn list(&self) -> HashMap<u64, ObserverState> {
         let inner = self.inner.read().expect("Observers poisoned");
         inner.clone()
+    }
+
+    /// Register a sender for a given observer connection.
+    pub fn register_sender(
+        &self,
+        connection_id: u64,
+        sender: tokio::sync::mpsc::UnboundedSender<Message>,
+    ) {
+        let mut senders = self.senders.write().expect("Observers senders poisoned");
+        senders.insert(connection_id, sender);
+    }
+
+    /// Snapshot of all active senders.
+    pub fn sender_snapshot(&self) -> HashMap<u64, tokio::sync::mpsc::UnboundedSender<Message>> {
+        let senders = self.senders.read().expect("Observers senders poisoned");
+        senders.clone()
     }
 }
 
@@ -503,27 +526,29 @@ async fn broadcast_to_observers(env: &Envelope, observers: &Observers) -> Result
     }
 
     let payload = serde_json::to_string(env)?;
-    // In a future iteration, we will maintain a mapping from observer
-    // connection IDs to actual WebSocket send halves so that we can send
-    // these payloads directly. For now, this function is a placeholder
-    // hook showing where broadcast logic will live.
-    //
-    // e.g. something like:
-    // for (id, state) in snapshot {
-    //     if state.subscribed_kinds.contains(&StreamKind::RegisterAgent) {
-    //         if let Some(sender) = observer_senders.get(&id) {
-    //             let _ = sender.send(Message::Text(payload.clone())).await;
-    //         }
-    //     }
-    // }
+
+    // Take a snapshot of active senders so we can broadcast without holding
+    // the lock while sending frames.
+    let sender_snapshot = observers.sender_snapshot();
+
+    for (id, state) in snapshot {
+        if !state.subscribed_kinds.contains(&StreamKind::RegisterAgent) {
+            continue;
+        }
+
+        if let Some(sender) = sender_snapshot.get(&id) {
+            // Ignore individual send errors; observers that go away will
+            // naturally be cleaned up when their connection handler exits.
+            let _ = sender.send(Message::Text(payload.clone()));
+        }
+    }
 
     info!(
         kind = ?env.kind,
-        subscriber_count = snapshot.len(),
-        "would broadcast envelope to observers (not yet wired to sockets)"
+        subscriber_count = sender_snapshot.len(),
+        "broadcasted envelope to subscribed observers"
     );
 
-    let _ = payload; // avoid unused warning until senders are wired up
     Ok(())
 }
 
@@ -531,7 +556,7 @@ async fn broadcast_to_observers(env: &Envelope, observers: &Observers) -> Result
 ///
 /// Observers send JSON commands to subscribe to streams or request discovery
 /// data about the current deployment view.
-async fn handle_observer_connection(mut socket: WebSocket, state: AppState, peer: SocketAddr) {
+async fn handle_observer_connection(socket: WebSocket, state: AppState, peer: SocketAddr) {
     // For now, assign a synthetic connection ID based on a simple counter
     // derived from the PortmanSubscribers size plus a large offset to keep
     // namespaces distinct.
@@ -539,13 +564,33 @@ async fn handle_observer_connection(mut socket: WebSocket, state: AppState, peer
     let connection_id = base_id;
     state.observers.add(connection_id);
 
+    // Split the WebSocket into a sending half (driven via mpsc) and a
+    // receiving half (handled in this task). We keep the sending side in
+    // the observer registry so that broadcast_to_observers can push frames
+    // without needing direct access to this task.
+    let (ws_sender, mut ws_receiver) = socket.split();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
+    state.observers.register_sender(connection_id, tx.clone());
+
+    // Spawn a task to forward messages from the channel to the WebSocket.
+    let send_peer = peer;
+    tokio::spawn(async move {
+        let mut ws_sender = ws_sender;
+        while let Some(msg) = rx.recv().await {
+            if let Err(e) = ws_sender.send(msg).await {
+                warn!(connection_id, %send_peer, error = %e, "observer send loop error");
+                break;
+            }
+        }
+    });
+
     info!(
         connection_id,
         %peer,
         "Observer WS connected"
     );
 
-    while let Some(msg_result) = socket.recv().await {
+    while let Some(msg_result) = ws_receiver.next().await {
         match msg_result {
             Ok(Message::Text(text)) => {
                 info!(%peer, %text, "received WS text frame from observer client");
@@ -562,8 +607,8 @@ async fn handle_observer_connection(mut socket: WebSocket, state: AppState, peer
                             "status": "ok",
                             "message": "subscription updated",
                         });
-                        if let Err(e) = socket.send(Message::Text(response.to_string())).await {
-                            warn!(connection_id, %peer, error = %e, "failed to send subscription ack to observer");
+                        if let Err(e) = tx.send(Message::Text(response.to_string())) {
+                            warn!(connection_id, %peer, error = %e, "failed to enqueue subscription ack to observer");
                             break;
                         }
                     }
@@ -588,8 +633,8 @@ async fn handle_observer_connection(mut socket: WebSocket, state: AppState, peer
                             "agents": agents,
                         });
 
-                        if let Err(e) = socket.send(Message::Text(response.to_string())).await {
-                            warn!(connection_id, %peer, error = %e, "failed to send discovery response to observer");
+                        if let Err(e) = tx.send(Message::Text(response.to_string())) {
+                            warn!(connection_id, %peer, error = %e, "failed to enqueue discovery response to observer");
                             break;
                         }
                     }
@@ -611,8 +656,8 @@ async fn handle_observer_connection(mut socket: WebSocket, state: AppState, peer
                             "valid_stream_kinds": valid_kinds,
                         });
 
-                        if let Err(e) = socket.send(Message::Text(response.to_string())).await {
-                            warn!(connection_id, %peer, error = %e, "failed to send error/help response to observer");
+                        if let Err(e) = tx.send(Message::Text(response.to_string())) {
+                            warn!(connection_id, %peer, error = %e, "failed to enqueue error/help response to observer");
                             break;
                         }
                     }
