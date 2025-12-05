@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::SocketAddr,
     sync::{Arc, RwLock},
 };
@@ -92,7 +92,8 @@ pub struct Envelope {
 /// Configuration for the Portman-facing WebSocket server.
 ///
 /// In the first iteration we bind explicitly to a loopback address, and
-/// expose a single `/agent` endpoint that Portman connects to.
+/// expose a single `/agent` endpoint that Portman connects to, plus a
+/// separate `/observe` endpoint for operator/observer clients.
 #[derive(Clone, Debug)]
 pub struct PortmanWsConfig {
     /// Address to bind the WS server to, e.g. `127.0.0.1:9100`.
@@ -109,6 +110,8 @@ pub struct PortmanSubscriber {
     pub peer_addr: SocketAddr,
     /// Monotonic ID assigned by labman (not the protocol `agent_id`).
     pub connection_id: u64,
+    /// Optional agent identity once a RegisterAgent envelope has been seen.
+    pub agent_id: Option<String>,
 }
 
 /// In-memory registry of currently connected Portman subscribers.
@@ -144,9 +147,18 @@ impl PortmanSubscribers {
         let sub = PortmanSubscriber {
             peer_addr,
             connection_id: id,
+            agent_id: None,
         };
         inner.connections.insert(id, sub.clone());
         sub
+    }
+
+    /// Update the agent_id for a given connection, if present.
+    pub fn set_agent_id(&self, connection_id: u64, agent_id: String) {
+        let mut inner = self.inner.write().expect("PortmanSubscribers poisoned");
+        if let Some(sub) = inner.connections.get_mut(&connection_id) {
+            sub.agent_id = Some(agent_id);
+        }
     }
 
     /// Remove a subscriber by connection id, returning it if present.
@@ -172,13 +184,81 @@ impl PortmanSubscribers {
     }
 }
 
+/// Stream kinds that /observe clients can subscribe to.
+///
+/// This is intentionally minimal for now; we’ll add more variants as needed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamKind {
+    RegisterAgent,
+}
+
+/// Observer client subscription state.
+///
+/// Each observer connection may subscribe to zero or more stream kinds.
+#[derive(Debug, Default, Clone)]
+pub struct ObserverState {
+    pub subscribed_kinds: HashSet<StreamKind>,
+}
+
+/// Registry of active observer connections.
+#[derive(Debug, Default)]
+pub struct Observers {
+    inner: RwLock<HashMap<u64, ObserverState>>,
+}
+
+impl Observers {
+    pub fn new() -> Self {
+        Self {
+            inner: RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub fn add(&self, connection_id: u64) {
+        let mut inner = self.inner.write().expect("Observers poisoned");
+        inner.insert(connection_id, ObserverState::default());
+    }
+
+    pub fn remove(&self, connection_id: u64) {
+        let mut inner = self.inner.write().expect("Observers poisoned");
+        inner.remove(&connection_id);
+    }
+
+    pub fn set_subscription(&self, connection_id: u64, kinds: HashSet<StreamKind>) {
+        let mut inner = self.inner.write().expect("Observers poisoned");
+        if let Some(state) = inner.get_mut(&connection_id) {
+            state.subscribed_kinds = kinds;
+        }
+    }
+
+    pub fn list(&self) -> HashMap<u64, ObserverState> {
+        let inner = self.inner.read().expect("Observers poisoned");
+        inner.clone()
+    }
+}
+
+/// Commands an /observe client can send to control its subscription or
+/// request discovery data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "command", rename_all = "snake_case")]
+pub enum ObserveCommand {
+    /// Subscribe to a set of stream kinds (replaces any existing subscription).
+    Subscribe { kinds: Vec<StreamKind> },
+    /// Request discovery information about the current deployment view.
+    Discover {
+        #[serde(default)]
+        what: Option<String>,
+    },
+}
+
 /// State shared with the WS handlers.
 ///
-/// For now this is just the subscriber registry; in future we’ll also pass a
-/// channel or handle to the upstream Conplane WS client to relay messages.
+/// For now this includes the Portman subscriber registry and a registry of
+/// observer clients connected via `/observe`.
 #[derive(Clone)]
 struct AppState {
     subscribers: Arc<PortmanSubscribers>,
+    observers: Arc<Observers>,
 }
 
 /// Start the Portman-facing WebSocket server and run it until `shutdown` resolves.
@@ -198,13 +278,15 @@ pub async fn run_portman_ws_server(
 ) -> Result<Arc<PortmanSubscribers>> {
     let state = AppState {
         subscribers: Arc::new(PortmanSubscribers::new()),
+        observers: Arc::new(Observers::new()),
     };
 
+    // We use into_make_service_with_connect_info so that handlers using
+    // `ConnectInfo<SocketAddr>` can extract the peer address.
     let app = Router::new()
-        .route("/agent", get(handle_ws_upgrade))
+        .route("/agent", get(handle_ws_upgrade_agent))
+        .route("/observe", get(handle_ws_upgrade_observe))
         .with_state(state.clone())
-        // Provide ConnectInfo<SocketAddr> so handlers using `ConnectInfo`
-        // can extract the peer address.
         .into_make_service_with_connect_info::<SocketAddr>();
 
     let listener = TcpListener::bind(config.bind_addr).await?;
@@ -223,8 +305,9 @@ pub async fn run_portman_ws_server(
     Ok(subscribers)
 }
 
-/// HTTP handler that upgrades the connection to WebSocket.
-async fn handle_ws_upgrade(
+/// HTTP handler that upgrades the connection to WebSocket for Portman agents
+/// connecting on `/agent`.
+async fn handle_ws_upgrade_agent(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     ws: WebSocketUpgrade,
@@ -233,12 +316,23 @@ async fn handle_ws_upgrade(
     ws.on_upgrade(move |socket| handle_ws_connection(socket, state, addr))
 }
 
+/// HTTP handler that upgrades the connection to WebSocket for observer
+/// clients connecting on `/observe`.
+async fn handle_ws_upgrade_observe(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    info!(%addr, "Incoming observer WS connection");
+    ws.on_upgrade(move |socket| handle_observer_connection(socket, state, addr))
+}
+
 /// Handle a single WebSocket connection from a Portman daemon.
 ///
 /// For now this:
 /// - registers the connection in `PortmanSubscribers`
 /// - logs text frames
-/// - responds with a simple `"ok"` message
+/// - responds with a simple `"ok"` message or error envelopes
 async fn handle_ws_connection(socket: WebSocket, state: AppState, peer: SocketAddr) {
     let subscriber = state.subscribers.add(peer);
     info!(
@@ -248,8 +342,10 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState, peer: SocketAd
     );
 
     let connection_id = subscriber.connection_id;
+    let subscribers = state.subscribers.clone();
+    let observers = state.observers.clone();
 
-    if let Err(e) = drive_ws_connection(socket, peer).await {
+    if let Err(e) = drive_ws_connection(socket, peer, connection_id, subscribers, observers).await {
         warn!(
             connection_id,
             %peer,
@@ -284,7 +380,13 @@ async fn handle_ws_connection(socket: WebSocket, state: AppState, peer: SocketAd
 /// This is kept separate from `handle_ws_connection` so that later we can
 /// swap the body for real protocol handling while preserving connection
 /// registration/teardown behavior.
-fn drive_ws_connection(mut socket: WebSocket, peer: SocketAddr) -> BoxFuture<'static, Result<()>> {
+fn drive_ws_connection(
+    mut socket: WebSocket,
+    peer: SocketAddr,
+    connection_id: u64,
+    subscribers: Arc<PortmanSubscribers>,
+    observers: Arc<Observers>,
+) -> BoxFuture<'static, Result<()>> {
     Box::pin(async move {
         while let Some(msg_result) = socket.recv().await {
             match msg_result {
@@ -302,6 +404,20 @@ fn drive_ws_connection(mut socket: WebSocket, peer: SocketAddr) -> BoxFuture<'st
                                 direction = ?env.direction,
                                 "parsed Portman protocol envelope"
                             );
+
+                            // If this is a RegisterAgent from Portman, update the
+                            // subscriber record with the agent_id for discovery.
+                            if env.direction == Direction::Up
+                                && env.kind == MessageKind::RegisterAgent
+                            {
+                                if let Some(agent_id) = env.agent_id.clone() {
+                                    subscribers.set_agent_id(connection_id, agent_id);
+                                }
+
+                                // Broadcast this envelope to any observers that
+                                // subscribed to the RegisterAgent stream.
+                                broadcast_to_observers(&env, &observers).await?;
+                            }
 
                             // For now, simply acknowledge receipt with a generic "ok".
                             if let Err(e) = socket.send(Message::Text("ok".into())).await {
@@ -369,4 +485,158 @@ fn drive_ws_connection(mut socket: WebSocket, peer: SocketAddr) -> BoxFuture<'st
 
         Ok(())
     })
+}
+
+/// Broadcast a given envelope to all observer connections that are subscribed
+/// to the matching stream kind.
+///
+/// For the first iteration we only support `StreamKind::RegisterAgent` and
+/// only broadcast `RegisterAgent` envelopes.
+async fn broadcast_to_observers(env: &Envelope, observers: &Observers) -> Result<()> {
+    if env.kind != MessageKind::RegisterAgent {
+        return Ok(());
+    }
+
+    let snapshot = observers.list();
+    if snapshot.is_empty() {
+        return Ok(());
+    }
+
+    let payload = serde_json::to_string(env)?;
+    // In a future iteration, we will maintain a mapping from observer
+    // connection IDs to actual WebSocket send halves so that we can send
+    // these payloads directly. For now, this function is a placeholder
+    // hook showing where broadcast logic will live.
+    //
+    // e.g. something like:
+    // for (id, state) in snapshot {
+    //     if state.subscribed_kinds.contains(&StreamKind::RegisterAgent) {
+    //         if let Some(sender) = observer_senders.get(&id) {
+    //             let _ = sender.send(Message::Text(payload.clone())).await;
+    //         }
+    //     }
+    // }
+
+    info!(
+        kind = ?env.kind,
+        subscriber_count = snapshot.len(),
+        "would broadcast envelope to observers (not yet wired to sockets)"
+    );
+
+    let _ = payload; // avoid unused warning until senders are wired up
+    Ok(())
+}
+
+/// Handle a single WebSocket connection from an observer client on `/observe`.
+///
+/// Observers send JSON commands to subscribe to streams or request discovery
+/// data about the current deployment view.
+async fn handle_observer_connection(mut socket: WebSocket, state: AppState, peer: SocketAddr) {
+    // For now, assign a synthetic connection ID based on a simple counter
+    // derived from the PortmanSubscribers size plus a large offset to keep
+    // namespaces distinct.
+    let base_id = state.subscribers.len() as u64 + 1_000_000;
+    let connection_id = base_id;
+    state.observers.add(connection_id);
+
+    info!(
+        connection_id,
+        %peer,
+        "Observer WS connected"
+    );
+
+    while let Some(msg_result) = socket.recv().await {
+        match msg_result {
+            Ok(Message::Text(text)) => {
+                info!(%peer, %text, "received WS text frame from observer client");
+
+                match serde_json::from_str::<ObserveCommand>(&text) {
+                    Ok(ObserveCommand::Subscribe { kinds }) => {
+                        let mut set = HashSet::new();
+                        for k in kinds {
+                            set.insert(k);
+                        }
+                        state.observers.set_subscription(connection_id, set);
+
+                        let response = serde_json::json!({
+                            "status": "ok",
+                            "message": "subscription updated",
+                        });
+                        if let Err(e) = socket.send(Message::Text(response.to_string())).await {
+                            warn!(connection_id, %peer, error = %e, "failed to send subscription ack to observer");
+                            break;
+                        }
+                    }
+                    Ok(ObserveCommand::Discover { what }) => {
+                        // For now we only support discovering connected Portman
+                        // agents from the subscriber registry.
+                        let subs = state.subscribers.list();
+                        let agents: Vec<_> = subs
+                            .into_iter()
+                            .map(|s| {
+                                serde_json::json!({
+                                    "connection_id": s.connection_id,
+                                    "peer_addr": s.peer_addr.to_string(),
+                                    "agent_id": s.agent_id,
+                                })
+                            })
+                            .collect();
+
+                        let response = serde_json::json!({
+                            "status": "ok",
+                            "what": what.unwrap_or_else(|| "agents".to_string()),
+                            "agents": agents,
+                        });
+
+                        if let Err(e) = socket.send(Message::Text(response.to_string())).await {
+                            warn!(connection_id, %peer, error = %e, "failed to send discovery response to observer");
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        warn!(
+                            connection_id,
+                            %peer,
+                            error = %err,
+                            "failed to decode observer command; sending help"
+                        );
+
+                        // Send a help response with valid stream kinds and commands.
+                        let valid_kinds: Vec<&'static str> = vec!["register_agent"];
+                        let response = serde_json::json!({
+                            "status": "error",
+                            "code": "INVALID_OBSERVE_COMMAND",
+                            "message": format!("failed to parse observe command: {}", err),
+                            "valid_commands": ["subscribe", "discover"],
+                            "valid_stream_kinds": valid_kinds,
+                        });
+
+                        if let Err(e) = socket.send(Message::Text(response.to_string())).await {
+                            warn!(connection_id, %peer, error = %e, "failed to send error/help response to observer");
+                            break;
+                        }
+                    }
+                }
+            }
+            Ok(Message::Binary(_)) => {
+                warn!(connection_id, %peer, "ignoring binary observer frame");
+            }
+            Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
+            Ok(Message::Close(frame)) => {
+                info!(connection_id, %peer, ?frame, "Observer WS close frame received");
+                break;
+            }
+            Err(e) => {
+                warn!(connection_id, %peer, error = %e, "error reading observer WS frame");
+                break;
+            }
+        }
+    }
+
+    state.observers.remove(connection_id);
+    info!(
+        connection_id,
+        %peer,
+        "Observer WS disconnected and removed from registry"
+    );
 }
