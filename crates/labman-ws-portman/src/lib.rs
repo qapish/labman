@@ -190,15 +190,26 @@ impl PortmanSubscribers {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamKind {
-    RegisterAgent,
+    /// Subscribe to all protocol envelopes regardless of `kind`.
+    All,
+    /// Subscribe only to specific protocol `kind` values (e.g. `register_agent`,
+    /// `heartbeat`, etc.). For now we use the same string space as `MessageKind`.
+    ByKind,
 }
 
 /// Observer client subscription state.
 ///
-/// Each observer connection may subscribe to zero or more stream kinds.
+/// Each observer connection may subscribe to zero or more stream kinds and,
+/// optionally, a set of concrete protocol `kind` strings when using the
+/// `ByKind` stream.
 #[derive(Debug, Default, Clone)]
 pub struct ObserverState {
+    /// High-level stream selectors (All / ByKind).
     pub subscribed_kinds: HashSet<StreamKind>,
+    /// Optional set of protocol `kind` strings when subscribed with `ByKind`.
+    ///
+    /// For example: ["register_agent", "heartbeat", "metrics"].
+    pub kinds_filter: Option<HashSet<String>>,
 }
 
 /// Registry of active observer connections.
@@ -266,7 +277,25 @@ impl Observers {
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum ObserveCommand {
     /// Subscribe to a set of stream kinds (replaces any existing subscription).
-    Subscribe { kinds: Vec<StreamKind> },
+    ///
+    /// When using the `by_kind` stream, the `kinds_filter` field controls which
+    /// protocol `kind` values should be echoed:
+    ///
+    /// {
+    ///   "command": "subscribe",
+    ///   "kinds": ["all"]
+    /// }
+    ///
+    /// {
+    ///   "command": "subscribe",
+    ///   "kinds": ["by_kind"],
+    ///   "kinds_filter": ["register_agent", "heartbeat"]
+    /// }
+    Subscribe {
+        kinds: Vec<StreamKind>,
+        #[serde(default)]
+        kinds_filter: Option<Vec<String>>,
+    },
     /// Request discovery information about the current deployment view.
     Discover {
         #[serde(default)]
@@ -436,11 +465,12 @@ fn drive_ws_connection(
                                 if let Some(agent_id) = env.agent_id.clone() {
                                     subscribers.set_agent_id(connection_id, agent_id);
                                 }
-
-                                // Broadcast this envelope to any observers that
-                                // subscribed to the RegisterAgent stream.
-                                broadcast_to_observers(&env, &observers).await?;
                             }
+
+                            // Broadcast this envelope to any observers that have
+                            // subscribed to relevant streams (either `all` or a
+                            // matching `by_kind` filter).
+                            broadcast_to_observers(&env, &observers).await?;
 
                             // For now, simply acknowledge receipt with a generic "ok".
                             if let Err(e) = socket.send(Message::Text("ok".into())).await {
@@ -511,15 +541,14 @@ fn drive_ws_connection(
 }
 
 /// Broadcast a given envelope to all observer connections that are subscribed
-/// to the matching stream kind.
+/// to streams covering this protocol message.
 ///
-/// For the first iteration we only support `StreamKind::RegisterAgent` and
-/// only broadcast `RegisterAgent` envelopes.
+/// Semantics:
+/// - If an observer subscribed to `all`, it receives every envelope.
+/// - If an observer subscribed to `by_kind`, it receives envelopes whose
+///   `kind` string matches one of its `kinds_filter` entries.
+/// - Additional stream types can be layered on later if needed.
 async fn broadcast_to_observers(env: &Envelope, observers: &Observers) -> Result<()> {
-    if env.kind != MessageKind::RegisterAgent {
-        return Ok(());
-    }
-
     let snapshot = observers.list();
     if snapshot.is_empty() {
         return Ok(());
@@ -527,18 +556,36 @@ async fn broadcast_to_observers(env: &Envelope, observers: &Observers) -> Result
 
     let payload = serde_json::to_string(env)?;
 
-    // Take a snapshot of active senders so we can broadcast without holding
-    // the lock while sending frames.
+    // Snapshot active senders so we can broadcast without holding locks while
+    // performing IO.
     let sender_snapshot = observers.sender_snapshot();
 
+    // Determine the canonical `kind` string for this envelope.
+    let kind_str = serde_json::to_string(&env.kind)?;
+    // `kind_str` will be a quoted JSON string (e.g. "\"register_agent\""); trim quotes.
+    let kind_str = kind_str.trim_matches('"').to_string();
+
     for (id, state) in snapshot {
-        if !state.subscribed_kinds.contains(&StreamKind::RegisterAgent) {
+        let wants_all = state.subscribed_kinds.contains(&StreamKind::All);
+        let wants_by_kind = state.subscribed_kinds.contains(&StreamKind::ByKind);
+
+        if !wants_all && !wants_by_kind {
             continue;
         }
 
+        if wants_by_kind {
+            // If using a by_kind filter, ensure this envelope's kind is in the filter set.
+            if let Some(filter) = &state.kinds_filter {
+                if !filter.contains(&kind_str) {
+                    continue;
+                }
+            } else {
+                // No filter configured; treat as no interest in any specific kind.
+                continue;
+            }
+        }
+
         if let Some(sender) = sender_snapshot.get(&id) {
-            // Ignore individual send errors; observers that go away will
-            // naturally be cleaned up when their connection handler exits.
             let _ = sender.send(Message::Text(payload.clone()));
         }
     }
@@ -596,16 +643,37 @@ async fn handle_observer_connection(socket: WebSocket, state: AppState, peer: So
                 info!(%peer, %text, "received WS text frame from observer client");
 
                 match serde_json::from_str::<ObserveCommand>(&text) {
-                    Ok(ObserveCommand::Subscribe { kinds }) => {
+                    Ok(ObserveCommand::Subscribe {
+                        kinds,
+                        kinds_filter,
+                    }) => {
                         let mut set = HashSet::new();
                         for k in kinds {
                             set.insert(k);
                         }
-                        state.observers.set_subscription(connection_id, set);
+
+                        // Normalise the optional kinds_filter into a HashSet<String>.
+                        let kinds_filter_set =
+                            kinds_filter.map(|v| v.into_iter().collect::<HashSet<_>>());
+
+                        state.observers.set_subscription(connection_id, set.clone());
+
+                        // Update the filter on the ObserverState directly.
+                        {
+                            let mut inner =
+                                state.observers.inner.write().expect("Observers poisoned");
+                            if let Some(st) = inner.get_mut(&connection_id) {
+                                st.kinds_filter = kinds_filter_set;
+                            }
+                        }
 
                         let response = serde_json::json!({
                             "status": "ok",
                             "message": "subscription updated",
+                            "subscribed_kinds": set.into_iter().map(|sk| match sk {
+                                StreamKind::All => "all",
+                                StreamKind::ByKind => "by_kind",
+                            }).collect::<Vec<_>>(),
                         });
                         if let Err(e) = tx.send(Message::Text(response.to_string())) {
                             warn!(connection_id, %peer, error = %e, "failed to enqueue subscription ack to observer");
@@ -647,13 +715,24 @@ async fn handle_observer_connection(socket: WebSocket, state: AppState, peer: So
                         );
 
                         // Send a help response with valid stream kinds and commands.
-                        let valid_kinds: Vec<&'static str> = vec!["register_agent"];
+                        let valid_kinds: Vec<&'static str> = vec!["all", "by_kind"];
                         let response = serde_json::json!({
                             "status": "error",
                             "code": "INVALID_OBSERVE_COMMAND",
                             "message": format!("failed to parse observe command: {}", err),
                             "valid_commands": ["subscribe", "discover"],
                             "valid_stream_kinds": valid_kinds,
+                            "subscribe_examples": [
+                                {
+                                    "command": "subscribe",
+                                    "kinds": ["all"]
+                                },
+                                {
+                                    "command": "subscribe",
+                                    "kinds": ["by_kind"],
+                                    "kinds_filter": ["register_agent", "heartbeat"]
+                                }
+                            ],
                         });
 
                         if let Err(e) = tx.send(Message::Text(response.to_string())) {
