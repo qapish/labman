@@ -14,12 +14,80 @@ use axum::{
     Router,
 };
 use futures::{future::BoxFuture, Future};
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 
 /// Minimal error type alias for now; we’ll likely switch to `labman_core::LabmanError`
 /// once this crate is wired into the rest of the system.
 pub type Result<T> = std::result::Result<T, anyhow::Error>;
+
+/// Direction of a protocol envelope, as seen on the wire.
+///
+/// Matches the `direction` field in `protocol.md`:
+/// - "up" / "upstream"   — Agent/Portman → Conplane
+/// - "down" / "downstream" — Conplane → Agent/Portman
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Direction {
+    #[serde(alias = "upstream")]
+    Up,
+    #[serde(alias = "downstream")]
+    Down,
+}
+
+/// High-level kind of message as described in `protocol.md`.
+///
+/// For the first iteration we only model a subset and fall back to `Unknown`
+/// for anything we don’t explicitly understand.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageKind {
+    // Agent → Conplane
+    RegisterAgent,
+    Heartbeat,
+    Metrics,
+    OfferCapacity,
+    DirectiveProgress,
+    UsageReport,
+    ResourceProfiles,
+    AvailableModelCapacity,
+
+    // Conplane → Agent
+    PreloadModel,
+    EvictModel,
+    AssignWorkload,
+    UpdateRegistry,
+    Drain,
+    RestartAgent,
+
+    // Ack / Error
+    Ack,
+    Error,
+
+    /// Any other kind we don't recognise yet.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Minimal envelope type for messages between Portman and Conplane.
+///
+/// This mirrors the top-level structure in `protocol.md`. For now we keep the
+/// payload as raw JSON so that we don’t need to model every variant up front.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Envelope {
+    pub msg_id: String,
+    #[serde(default)]
+    pub site_id: Option<String>,
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    pub direction: Direction,
+    pub kind: MessageKind,
+    #[serde(default)]
+    pub ts: Option<String>,
+    #[serde(default)]
+    pub payload: serde_json::Value,
+}
 
 /// Configuration for the Portman-facing WebSocket server.
 ///
@@ -135,7 +203,7 @@ pub async fn run_portman_ws_server(
     let app = Router::new()
         .route("/agent", get(handle_ws_upgrade))
         .with_state(state.clone())
-        // Provide ConnectInfo&lt;SocketAddr&gt; so handlers using `ConnectInfo`
+        // Provide ConnectInfo<SocketAddr> so handlers using `ConnectInfo`
         // can extract the peer address.
         .into_make_service_with_connect_info::<SocketAddr>();
 
@@ -223,10 +291,62 @@ fn drive_ws_connection(mut socket: WebSocket, peer: SocketAddr) -> BoxFuture<'st
                 Ok(Message::Text(text)) => {
                     info!(%peer, %text, "received WS text frame from Portman");
 
-                    // For the first iteration, simply acknowledge receipt.
-                    if let Err(e) = socket.send(Message::Text("ok".into())).await {
-                        warn!(%peer, error = %e, "failed to send WS ack to Portman");
-                        break;
+                    // Try to parse the incoming frame as a protocol `Envelope`.
+                    match serde_json::from_str::<Envelope>(&text) {
+                        Ok(env) => {
+                            info!(
+                                %peer,
+                                msg_id = %env.msg_id,
+                                agent_id = ?env.agent_id,
+                                kind = ?env.kind,
+                                direction = ?env.direction,
+                                "parsed Portman protocol envelope"
+                            );
+
+                            // For now, simply acknowledge receipt with a generic "ok".
+                            if let Err(e) = socket.send(Message::Text("ok".into())).await {
+                                warn!(%peer, error = %e, "failed to send WS ack to Portman");
+                                break;
+                            }
+                        }
+                        Err(err) => {
+                            warn!(
+                                %peer,
+                                error = %err,
+                                "failed to parse WS text frame as protocol Envelope; sending error"
+                            );
+
+                            // Send a minimal error envelope back so Portman can see what went wrong.
+                            let error_env = Envelope {
+                                msg_id: "local-error".to_string(),
+                                site_id: None,
+                                agent_id: None,
+                                direction: Direction::Down,
+                                kind: MessageKind::Error,
+                                ts: None,
+                                payload: serde_json::json!({
+                                    "code": "INVALID_ENVELOPE",
+                                    "message": format!("failed to parse envelope: {}", err),
+                                }),
+                            };
+
+                            let payload = match serde_json::to_string(&error_env) {
+                                Ok(s) => s,
+                                Err(ser_err) => {
+                                    warn!(
+                                        %peer,
+                                        error = %ser_err,
+                                        "failed to serialize error envelope; closing connection"
+                                    );
+                                    break;
+                                }
+                            };
+
+                            if let Err(e) = socket.send(Message::Text(payload)).await {
+                                warn!(%peer, error = %e, "failed to send error envelope to Portman");
+                                break;
+                            }
+                        }
                     }
                 }
                 Ok(Message::Binary(_bin)) => {

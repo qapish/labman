@@ -13,9 +13,9 @@ tokio = { version = "1.37", features = ["rt-multi-thread", "macros", "net", "sig
 axum = { version = "0.7", features = ["ws"] }
 tracing = "0.1"
 futures = "0.3"
-
-# Use workspace anyhow dependency for error handling.
 anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 # Depend on labman-core for error types once we start integrating properly.
 labman-core = { path = "../labman-core" }

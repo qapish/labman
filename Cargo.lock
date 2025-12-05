@@ -986,6 +986,8 @@ dependencies = [
  "axum",
  "futures",
  "labman-core",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]
